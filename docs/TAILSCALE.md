@@ -166,31 +166,50 @@ Now every device can reach every other by bare hostname: `vps`, `mini`,
 
 ## Step 5 — The access policy (ACL)
 
-The **access policy** (also called the ACL file) is one JSON document in the
-admin console → **Access controls** that says who can reach what. A fresh
-personal tailnet ships with "allow all my own devices to talk to each other,"
-which is already safe (only *your* devices are in the tailnet). We add two
-things: a definition of `tag:server`, and an **SSH policy** so Tailscale SSH
-knows who may log in as which user.
+> **Where:** admin console → **Access controls → JSON editor**
+> (`login.tailscale.com/admin/acls/file`). You can do this step **now**, even
+> before the VPS exists — pre-defining `tag:server` here is what stops the VPS
+> auth key in Step 3a from complaining about an unowned tag. The `tag:server`
+> SSH rule simply matches nothing until the VPS joins.
 
-Paste this as your policy file (it's HuJSON — JSON that allows comments):
+The **access policy** is one JSON document that says who can reach what. The
+editor **already contains a default file** — an `acls` "allow all my devices"
+rule (keep it) and a default `ssh` rule whose `dst` is `autogroup:self`.
+
+That default SSH rule is the catch worth understanding:
+
+> **`autogroup:self` only covers your *own, untagged* devices.** The VPS will be
+> *tagged* (`tag:server`), and tagged devices have no user-owner — so the default
+> rule will **not** let you SSH into the VPS. That's exactly why we add a second
+> rule targeting `tag:server`.
+
+Easiest path for a newcomer: **select all in the editor, delete, and paste this
+complete known-good file**, then **Save**. It keeps the default self-SSH rule and
+adds the two things the mesh needs (it's HuJSON — JSON with comments):
 
 ```jsonc
 {
-  // Who is allowed to assign the tag:server label.
+  // Tags that may be applied to devices, and who may apply them.
   "tagOwners": {
     "tag:server": ["autogroup:admin"],
   },
 
-  // Network reachability. Default personal-tailnet rule: all your devices
-  // may reach all your devices. (Tighten later if you ever add shared users.)
+  // Network reachability: all your devices can reach all your devices.
   "acls": [
     { "action": "accept", "src": ["*"], "dst": ["*:*"] },
   ],
 
-  // Tailscale SSH rules: let YOU (the tailnet owner/members) SSH into the
-  // tagged server(s) as the "dev" user. "accept" = no extra browser check.
+  // Who can use Tailscale SSH, into which devices, as which users.
   "ssh": [
+    // Default: SSH into your own UNTAGGED devices (periodic browser check).
+    {
+      "action": "check",
+      "src":    ["autogroup:member"],
+      "dst":    ["autogroup:self"],
+      "users":  ["autogroup:nonroot", "root"],
+    },
+    // The VPS is tagged tag:server, so "autogroup:self" above won't match it.
+    // Allow SSH into it as the dev user, connecting immediately (no re-check).
     {
       "action": "accept",
       "src":    ["autogroup:member"],
@@ -206,9 +225,13 @@ Line by line:
   This is what lets the VPS auth key in Step 3a carry `tag:server`.
 - **`acls`** — the default "my devices can reach my devices." Fine for a
   single-person mesh.
-- **`ssh`** — the new part. `src: autogroup:member` = your logged-in devices;
-  `dst: tag:server` = the VPS; `users: ["dev", ...]` = you may log in as `dev`.
-  `action: "accept"` connects immediately.
+- **`ssh`** — two rules. The first is Tailscale's default (SSH between your own
+  untagged devices). The second is the one that matters for the mesh:
+  `dst: tag:server` = the VPS, `users: ["dev", …]` = you may log in as `dev`,
+  `action: "accept"` connects with no extra check.
+
+Use **Preview rules** to sanity-check, then **Save** (the grey button activates
+once you've made an edit). Policy changes apply within seconds.
 
 > **More secure variant (optional):** change the SSH rule's `"action"` to
 > `"check"` and add `"checkPeriod": "12h"`. Then the first SSH from a device each
