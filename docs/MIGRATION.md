@@ -65,6 +65,13 @@ directory.
   as-is; only committed branches are pushed. The script tells you if it skipped
   uncommitted work.
 - **No force-push, ever.** It only adds; it never rewrites remote history.
+- **Behind-remote branches are skipped, not clobbered.** If a local branch is
+  *behind* its remote (the remote already has newer commits), `git push` rejects
+  it with a `non-fast-forward` error — that's the safety net, not a failure.
+  Nothing is lost (the local branch has no unique commits); run `git pull` in
+  that repo to sync it. Branches that *do* have unique local commits push
+  normally. So a mixed "some pushed, `main` rejected" result is healthy: it means
+  your unique work went up and an already-newer remote was left alone.
 - **Idempotent.** Re-running a migrated project just re-pushes (a no-op if
   nothing changed).
 
