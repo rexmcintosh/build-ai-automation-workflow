@@ -10,14 +10,25 @@ This is the one setup doc you can fully execute **today**, with the Mini in fron
 of you. Work top to bottom; each section has a concept, the steps (GUI + CLI),
 and a verify command.
 
-> **Check current state first** (all read-only, no `sudo`):
+> **Paste tip (macOS zsh):** some blocks below carry `# comments`. macOS's
+> interactive zsh does **not** treat `#` as a comment when pasted, so the comment
+> becomes stray arguments (you'll see errors like
+> `grep: #: No such file or directory`). Fix it once with
+> `setopt interactive_comments` (add that line to `~/.zshrc` to make it
+> permanent) — or simply don't paste the `# ...` part.
+
+> **Check current state first** (read-only, no `sudo`; this block is comment-free
+> and paste-safe):
 > ```bash
-> pmset -g | grep -E 'sleep|womp|autorestart|disksleep'   # power settings
-> fdesetup status                                          # FileVault on/off
+> pmset -g | grep -E 'sleep|womp|autorestart|disksleep'
+> fdesetup status
 > nc -z localhost 22 && echo "Remote Login ON" || echo "Remote Login OFF"
-> tmutil destinationinfo                                   # Time Machine target
+> tmutil destinationinfo
 > ls -d /Applications/Backblaze.app 2>/dev/null && echo "Backblaze installed"
 > ```
+> These report, in order: **power/sleep** settings · **FileVault** on/off ·
+> whether **Remote Login** is on · the **Time Machine** destination · whether
+> **Backblaze** is installed.
 
 ---
 
