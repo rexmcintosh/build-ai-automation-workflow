@@ -175,14 +175,29 @@ count once the initial pass completes.
 **Concept:** After a reboot the Mini must rejoin the tailnet **on its own**, with
 no one typing anything — otherwise "always reachable" breaks every power blip.
 
-In the **Tailscale** menu-bar app → **Settings**:
-- Enable **"Start Tailscale on login."**
-- If offered, enable **"Run unattended"** (a.k.a. keep running when logged out) so
-  it reconnects at the login window, not just after you sign in.
-- Enable **auto-update**.
+In the **Tailscale** menu-bar app → **Settings**, confirm:
+- **"Launch Tailscale at login"** — **on** (starts when you log in).
+- **"Allow incoming connections"** — **on**. This is what lets your other devices
+  reach the Mini; if it's off, your phone/MacBook can't SSH in.
+- **"Use Tailscale DNS settings"** — **on** (MagicDNS).
 
-Combined with `pmset autorestart 1` (Section 1), a power cut → the Mini reboots
-and reconnects by itself.
+> **Mac App Store limitation:** the sandboxed App Store build offers **only**
+> "Launch at login" — there is **no "run unattended"** option, so Tailscale starts
+> only *after a user logs in*. True unattended reconnection (at the login screen,
+> nobody signed in) needs either the **standalone** Tailscale build from
+> tailscale.com (it installs a background system service) or macOS **automatic
+> login** — and **FileVault gates both** at the unlock screen anyway (see the
+> caveat below). For an always-on Mini that's rarely rebooted and usually logged
+> in, **"Launch at login" is enough** — don't over-engineer it unless the Mini
+> becomes your always-on host.
+
+So: a power cut → `pmset autorestart 1` reboots the Mini → it reconnects as soon
+as your user session logs back in (instantly, if you stay logged in).
+
+> **CLI on PATH (optional):** that **"CLI integration → Show me how"** button
+> tells you how to symlink the `tailscale` command into your PATH, so you can run
+> `tailscale status` directly instead of the long `/Applications/Tailscale.app/...`
+> path.
 
 > ### ⚠️ The FileVault reboot caveat (read this)
 > **FileVault encrypts your disk — keep it on.** But there's an unavoidable
