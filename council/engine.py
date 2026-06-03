@@ -6,6 +6,14 @@ from .models import Member, Panel, Finding, MemberResult
 from .prompts import MEMBER_OUTPUT
 
 
+def _as_int(value, default: int = 5) -> int:
+    """Coerce a model-supplied confidence to an int, tolerating null/strings."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _ask_member(member: Member, context: str, client) -> MemberResult:
     try:
         raw = client.complete(
@@ -17,7 +25,7 @@ def _ask_member(member: Member, context: str, client) -> MemberResult:
         findings = [
             Finding(point=str(f.get("point", "")),
                     severity=str(f.get("severity", "info")),
-                    confidence=int(f.get("confidence", 5)))
+                    confidence=_as_int(f.get("confidence", 5)))
             for f in data.get("findings", []) if isinstance(f, dict)
         ]
         return MemberResult(

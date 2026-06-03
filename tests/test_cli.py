@@ -39,6 +39,16 @@ def test_ask_explicit_panel_overrides_router(capsys, member_json):
     assert all(c["model"] != "r" for c in client.calls)
 
 
+def test_ask_unknown_panel_errors_friendly(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ask", "x", "--panel", "nope"], _settings=settings,
+                 _panels=panels, _client=client)
+    assert exc.value.code == 2
+    assert "unknown panel" in capsys.readouterr().err
+
+
 def test_panels_does_not_require_api_key(capsys, monkeypatch, tmp_path):
     # Listing panels is a local-only operation: it must work with no key set,
     # via the production path (no injected client) — the client is built lazily.

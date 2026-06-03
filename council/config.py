@@ -37,7 +37,8 @@ def _panels_path(path=None) -> Path:
 
 
 def load_panels(path=None):
-    data = tomllib.load(open(_panels_path(path), "rb"))
+    with open(_panels_path(path), "rb") as fh:
+        data = tomllib.load(fh)
     s = data.get("settings", {})
     settings = Settings(
         default_panel=s.get("default_panel", "decision"),

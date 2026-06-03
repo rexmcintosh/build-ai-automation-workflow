@@ -5,6 +5,14 @@ from .models import MemberResult, Disagreement, Synthesis
 from .prompts import SYNTH_OUTPUT
 
 
+def _as_int(value, default: int = 5) -> int:
+    """Coerce a model-supplied confidence to an int, tolerating null/strings."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _panel_digest(results: list[MemberResult]) -> str:
     lines = []
     for r in results:
@@ -35,7 +43,7 @@ def synthesize(context: str, results: list[MemberResult], client, *, chair_model
         ) for x in d.get("disagreements", []) if isinstance(x, dict)]
         return Synthesis(
             recommendation=str(d.get("recommendation", "")),
-            confidence=int(d.get("confidence", 5)),
+            confidence=_as_int(d.get("confidence", 5)),
             consensus=[str(c) for c in d.get("consensus", [])],
             disagreements=dis,
             cross_panel_themes=[str(t) for t in d.get("cross_panel_themes", [])],

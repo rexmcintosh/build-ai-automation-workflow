@@ -36,3 +36,16 @@ def test_run_panel_coerces_bad_json():
     client = FakeClient(default="not json at all")
     results = run_panel(_panel(), "x", client)
     assert all(r.error is not None for r in results)
+
+
+def test_run_panel_tolerates_non_numeric_confidence():
+    # A bad confidence on one finding must not nullify the whole member.
+    bad = {"stance": "concerns", "headline": "h",
+           "findings": [{"point": "p1", "severity": "med", "confidence": "high"},
+                        {"point": "p2", "severity": "low", "confidence": None}],
+           "suggestions": []}
+    client = FakeClient(default=bad)
+    results = run_panel(_panel(), "x", client)
+    for r in results:
+        assert r.error is None
+        assert [f.confidence for f in r.findings] == [5, 5]  # coerced to default

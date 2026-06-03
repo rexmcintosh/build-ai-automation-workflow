@@ -33,6 +33,10 @@ def _run(context, panel_name, settings, panels, client, rigor, fmt):
         panel_name = pick_panel(context, panels, client,
                                 router_model=settings.router_model,
                                 default=settings.default_panel)
+    if panel_name not in panels:
+        print(f"error: unknown panel '{panel_name}'. Available: "
+              f"{', '.join(panels)}.", file=sys.stderr)
+        raise SystemExit(2)
     panel = panels[panel_name]
     rigor = rigor or panel.default_rigor
     results = run_panel(panel, context, client)
@@ -91,8 +95,15 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
             text = sys.stdin.read()
         else:
             pth = Path(args.path)
-            text = "\n\n".join(f"--- {f} ---\n{f.read_text(errors='ignore')}"
-                               for f in (pth.rglob("*") if pth.is_dir() else [pth]) if f.is_file())
+            files = pth.rglob("*") if pth.is_dir() else [pth]
+            text = "\n\n".join(
+                f"--- {f} ---\n{f.read_text(errors='ignore')}"
+                for f in files
+                # skip dotfiles/dirs so we never feed .env, .git, etc. to the panel
+                if f.is_file() and not any(part.startswith(".") for part in f.parts))
+        if not text.strip():
+            print("Nothing to review (empty diff / no readable files).", file=sys.stderr)
+            return 0
         ctx = truncate(f"Review this:\n\n{text}", settings.byte_cap)
         return _run(ctx, args.panel, settings, panels, client, args.rigor, args.format)
 
