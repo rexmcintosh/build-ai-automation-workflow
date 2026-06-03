@@ -251,35 +251,72 @@ Click **Save**. Policy changes apply within seconds.
 
 ---
 
-## Step 6 — Verify the whole mesh
+## Step 6 — Verify the mesh
 
-Run these and confirm each one. This is the "is it actually working?" gate.
+The "is it actually working?" gate. Split into what you can check **now** (the
+three devices you have today) and what waits for the **VPS**.
 
-**From the Mac Mini (or MacBook):**
+> **macOS CLI tip:** if you installed Tailscale from the **Mac App Store**, the
+> `tailscale` command isn't on your PATH — it lives inside the app bundle. Use
+> the full path, or add an alias:
+> ```bash
+> alias tailscale='/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+> ```
+> (Homebrew `--cask` installs put `tailscale` on PATH already.) The menu-bar
+> icon also shows status without any CLI.
+
+### 6a — The three devices (do this now, no VPS needed)
+
+**See them all** (from the Mini or MacBook Terminal):
 ```bash
 tailscale status
-# Expect a line per device: vps, mini, macbook, iphone — all without "offline".
-
-tailscale ping vps
-# Expect "pong" — ideally "direct" (a direct tunnel), "via DERP" also works.
-
-ssh dev@vps
-# Should log you in WITHOUT having set up an SSH key for this device —
-# that's Tailscale SSH using your tailnet identity. Type `exit` to leave.
+# One line per device (mini, macbook, iphone). A "-" in the last column means
+# idle, not offline — an actual outage prints the word "offline".
 ```
 
-**From the iPhone (Termius or the Tailscale app's ping tool):**
-- In Termius, add/confirm a host with hostname **`vps`** (the MagicDNS name, not
-  an IP). Connect — you should land on the VPS over the private mesh.
+**Prove the tunnels carry traffic** — ping the other devices by their MagicDNS
+name (use *your* device names from `tailscale status`):
+```bash
+tailscale ping rexmb              # your MacBook
+# pong from rexmb (100.x.y.z) via 192.168.x.x:41641 in 2ms      <- direct, same LAN
 
-**Sanity checks:**
-- In the admin console, all four machines show a recent "Last seen" and the VPS
-  shows **Expiry: Disabled** and the **tag:server** badge.
-- Turn the Mac Mini *off*: you can still `ssh dev@vps` from the MacBook/iPhone.
-  (Proves active work doesn't depend on the Mini — the architecture's core
-  promise.)
+tailscale ping iphone-se-gen-3    # your iPhone
+# pong from iphone-se-gen-3 (100.x.y.z) via <public-ip>:port in 20ms  <- direct over the internet
 
-If all of that passes, the wiring is done.
+ping -c 3 rexmb                   # plain ICMP — also proves MagicDNS resolves the name
+```
+Reading the result: `via <LAN-ip>` = a direct tunnel on your local network;
+`via <public-ip>` = a direct tunnel across the internet (e.g. phone on
+cellular); `via DERP` = relayed through Tailscale's servers (slower, still
+fine). **Any `pong` = success.**
+
+> `tailscale ping` is round-trip, so a `pong` proves the peer is reachable **and**
+> replying — you don't have to repeat the test from every device. If a peer
+> doesn't answer, wake it / open its Tailscale app and retry.
+
+**Checklist for now:**
+- [ ] `tailscale status` lists all three devices (none "offline").
+- [ ] `tailscale ping` to each other device returns a `pong`.
+- [ ] MagicDNS short names resolve (`ping mini`, `ping rexmb`).
+
+### 6b — With the VPS (do this after PLAYBOOK Phases 1–3)
+
+```bash
+tailscale ping vps
+# Expect "pong" — direct ideal, "via DERP" also works.
+
+ssh dev@vps
+# Logs you in with NO SSH key set up on this device — that's Tailscale SSH using
+# your tailnet identity. Type `exit` to leave.
+```
+- In Termius (iPhone/Mac), set the host's hostname to **`vps`** (MagicDNS) and
+  connect — you should land on the VPS over the private mesh.
+- In the admin console, the VPS shows **Expiry: Disabled** and the
+  **tag:server** badge.
+- **The promise test:** turn the Mac Mini *off* — you can still `ssh dev@vps`
+  from the MacBook/iPhone. Active work never depended on the Mini.
+
+If 6a passes now and 6b passes once the VPS is up, the wiring is done.
 
 ---
 
