@@ -169,8 +169,10 @@ fi
 if [ -n "$TO_HOST" ]; then
   step "Phase B — cloning onto host '$TO_HOST' at ~/$REMOTE_DIR/$NAME"
   RURL="$(git remote get-url origin 2>/dev/null || echo "https://github.com/$OWNER/$NAME.git")"
-  # Requires: $TO_HOST reachable (Tailscale), and gh/git authed to GitHub there.
-  run ssh "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || gh repo clone '$OWNER/$NAME' '$NAME' || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags"
+  # Requires: $TO_HOST reachable (Tailscale) and git authed to GitHub there
+  # (gh auth login + gh auth setup-git, so HTTPS clones of private repos work).
+  # Clone from the real origin URL so a folder name != repo name still works.
+  run ssh "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags --prune"
   run ssh "$TO_HOST" "tmux has-session -t '$NAME' 2>/dev/null || tmux new-session -d -s '$NAME' -c ~/$REMOTE_DIR/'$NAME'"
   ok "On $TO_HOST: ~/$REMOTE_DIR/$NAME  (tmux session '$NAME')"
   printf '   attach with:  %sssh %s -t "tmux attach -t %s"%s\n' "$DIM" "$TO_HOST" "$NAME" "$RST"

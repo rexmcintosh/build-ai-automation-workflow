@@ -112,8 +112,8 @@ scripts/migrate-project.sh --to-host vps ~/Projects/some-project
 ```
 
 This runs Phase A as usual, then on the VPS:
-- clones the repo to `~/projects/<name>` (via `gh repo clone`, falling back to
-  `git clone`),
+- clones the repo to `~/projects/<name>` from its **origin URL** (private repos
+  work via the `gh` credential helper — `gh auth login` + `gh auth setup-git`),
 - starts a detached `tmux` session named `<name>`.
 
 Attach from any device:
