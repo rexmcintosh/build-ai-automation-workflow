@@ -180,6 +180,10 @@ fi
 if [ "$DRY" = 1 ]; then
   printf '\n%sdry-run complete — nothing was changed.%s\n' "$DIM" "$RST"
 else
-  ok "Done: $OWNER/$NAME"
-  printf '   GitHub: %shttps://github.com/%s/%s%s\n' "$DIM" "$OWNER" "$NAME" "$RST"
+  # report the ACTUAL remote — the GitHub repo name may differ from the folder
+  WEB="$(git remote get-url origin 2>/dev/null || echo "https://github.com/$OWNER/$NAME.git")"
+  case "$WEB" in git@github.com:*) WEB="https://github.com/${WEB#git@github.com:}" ;; esac
+  WEB="${WEB%.git}"
+  ok "Done: $WEB"
+  printf '   GitHub: %s%s%s\n' "$DIM" "$WEB" "$RST"
 fi
