@@ -173,8 +173,15 @@ Now every device can reach every other by bare hostname: `vps`, `mini`,
 > SSH rule simply matches nothing until the VPS joins.
 
 The **access policy** is one JSON document that says who can reach what. The
-editor **already contains a default file** — an `acls` "allow all my devices"
+editor **already contains a default file** — a `grants` "allow all my devices"
 rule (keep it) and a default `ssh` rule whose `dst` is `autogroup:self`.
+
+> **`grants` vs `acls`:** Tailscale's newer policy syntax is **`grants`**;
+> `acls` is the legacy syntax. Newer tailnets (likely yours) ship a `grants`
+> file by default. Both still work and can even coexist, but use whichever your
+> file already has — don't mix them needlessly. The examples below use `grants`.
+> Also note: most of the default file is **commented-out examples** (`groups`,
+> `postures`, `tests`); only the live `grants` and `ssh` blocks matter.
 
 That default SSH rule is the catch worth understanding:
 
@@ -194,9 +201,9 @@ adds the two things the mesh needs (it's HuJSON — JSON with comments):
     "tag:server": ["autogroup:admin"],
   },
 
-  // Network reachability: all your devices can reach all your devices.
-  "acls": [
-    { "action": "accept", "src": ["*"], "dst": ["*:*"] },
+  // Network reachability (newer "grants" syntax): all your devices reach all.
+  "grants": [
+    { "src": ["*"], "dst": ["*"], "ip": ["*"] },
   ],
 
   // Who can use Tailscale SSH, into which devices, as which users.
@@ -223,8 +230,9 @@ adds the two things the mesh needs (it's HuJSON — JSON with comments):
 Line by line:
 - **`tagOwners`** — declares `tag:server` and says admins (you) may apply it.
   This is what lets the VPS auth key in Step 3a carry `tag:server`.
-- **`acls`** — the default "my devices can reach my devices." Fine for a
-  single-person mesh.
+- **`grants`** — the default "my devices can reach my devices" (the newer
+  successor to `acls`; your tailnet ships with it). Fine for a single-person
+  mesh.
 - **`ssh`** — two rules. The first is Tailscale's default (SSH between your own
   untagged devices). The second is the one that matters for the mesh:
   `dst: tag:server` = the VPS, `users: ["dev", …]` = you may log in as `dev`,
