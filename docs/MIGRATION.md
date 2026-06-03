@@ -108,7 +108,7 @@ Recommended approach:
 Once the VPS is up, on the mesh, and authenticated to GitHub, add `--to-host`:
 
 ```bash
-scripts/migrate-project.sh --to-host vps ~/Projects/some-project
+scripts/migrate-project.sh --to-host dev@vps ~/Projects/some-project
 ```
 
 This runs Phase A as usual, then on the VPS:
@@ -126,7 +126,7 @@ Use `--remote-dir <dir>` to change the remote projects directory (default
 
 > **Why Phase B is separate and later:** the VPS doesn't exist yet, and it can
 > only clone what's already on GitHub. Do Phase A for everything now; come back
-> and run `--to-host vps` per project once the server is provisioned
+> and run `--to-host dev@vps` per project once the server is provisioned
 > (`../setup/PLAYBOOK.md` Phases 1–3).
 
 ---

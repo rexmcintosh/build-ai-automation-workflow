@@ -142,5 +142,5 @@ device, one tap puts you right back.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the rule and the *why*.
 - [TAILSCALE.md](TAILSCALE.md) — how you reach the host privately, from anywhere.
-- [MIGRATION.md](MIGRATION.md) — how projects got onto the host (Phase B = `--to-host vps`).
+- [MIGRATION.md](MIGRATION.md) — how projects got onto the host (Phase B = `--to-host dev@vps`).
 - [`../setup/PLAYBOOK.md`](../setup/PLAYBOOK.md) — the VPS + Venice review pipeline and the screenshot-from-phone workaround (Phase 8).

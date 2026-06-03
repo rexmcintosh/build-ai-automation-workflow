@@ -15,7 +15,7 @@
 #
 # Options:
 #   --public           create the GitHub repo public (default: PRIVATE)
-#   --to-host HOST     also clone onto HOST and start a tmux session (Phase B)
+#   --to-host U@HOST   also clone onto host (e.g. dev@vps) + tmux session (Phase B)
 #   --remote-dir DIR   remote projects dir for --to-host (default: projects -> ~/projects)
 #   --yes              don't ask for confirmation (batch use — review first!)
 #   --dry-run          print what would happen; change nothing, push nothing
@@ -168,14 +168,24 @@ fi
 # ---- phase B (optional): clone onto a host + tmux --------------------------
 if [ -n "$TO_HOST" ]; then
   step "Phase B — cloning onto host '$TO_HOST' at ~/$REMOTE_DIR/$NAME"
+  case "$TO_HOST" in
+    *@*) : ;;
+    *) warn "--to-host '$TO_HOST' has no user@ — SSH will use your local username, which likely doesn't exist on the host. Use e.g. dev@$TO_HOST." ;;
+  esac
   RURL="$(git remote get-url origin 2>/dev/null || echo "https://github.com/$OWNER/$NAME.git")"
   # Requires: $TO_HOST reachable (Tailscale) and git authed to GitHub there
   # (gh auth login + gh auth setup-git, so HTTPS clones of private repos work).
   # Clone from the real origin URL so a folder name != repo name still works.
-  run ssh "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags --prune"
-  run ssh "$TO_HOST" "tmux has-session -t '$NAME' 2>/dev/null || tmux new-session -d -s '$NAME' -c ~/$REMOTE_DIR/'$NAME'"
-  ok "On $TO_HOST: ~/$REMOTE_DIR/$NAME  (tmux session '$NAME')"
-  printf '   attach with:  %sssh %s -t "tmux attach -t %s"%s\n' "$DIM" "$TO_HOST" "$NAME" "$RST"
+  if [ "$DRY" = 1 ]; then
+    printf '   %swould clone%s %s -> %s:~/%s/%s and start tmux session %s\n' \
+      "$DIM" "$RST" "$RURL" "$TO_HOST" "$REMOTE_DIR" "$NAME" "$NAME"
+  elif ssh "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags --prune"; then
+    ssh "$TO_HOST" "tmux has-session -t '$NAME' 2>/dev/null || tmux new-session -d -s '$NAME' -c ~/$REMOTE_DIR/'$NAME'"
+    ok "On $TO_HOST: ~/$REMOTE_DIR/$NAME  (tmux session '$NAME')"
+    printf '   attach with:  %sssh %s -t "tmux attach -t %s"%s\n' "$DIM" "$TO_HOST" "$NAME" "$RST"
+  else
+    warn "Phase B failed — could not clone onto '$TO_HOST'. Check it's reachable and that you used user@host (e.g. dev@vps)."
+  fi
 fi
 
 # ---- done -------------------------------------------------------------------
