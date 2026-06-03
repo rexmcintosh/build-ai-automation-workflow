@@ -140,16 +140,20 @@ for d in "$SCAN_DIR"/*/; do
       state="clean"
     fi
 
-    # branch count + unpushed (no upstream, or ahead of upstream)
+    # branch count + unpushed. A branch counts as "unpushed" only if its tip
+    # commit is on NO remote-tracking branch — i.e. that work exists only on this
+    # machine. This is more accurate than the old "ahead of upstream / no
+    # upstream" heuristic, which falsely flagged branches that WERE pushed under
+    # their own name but whose local upstream still pointed at origin/main.
     branches=0; unpushed=0
-    while IFS='|' read -r br up track; do
+    while IFS= read -r br; do
       [ -z "$br" ] && continue
       branches=$((branches + 1))
-      if [ -z "$up" ] || printf '%s' "$track" | grep -q 'ahead'; then
+      if [ -z "$(git -C "$d" branch -r --contains "$br" 2>/dev/null)" ]; then
         unpushed=$((unpushed + 1))
       fi
     done <<EOF
-$(git -C "$d" for-each-ref --format='%(refname:short)|%(upstream:short)|%(upstream:track)' refs/heads 2>/dev/null)
+$(git -C "$d" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
 EOF
 
     last="$(git -C "$d" log -1 --format='%cr' 2>/dev/null || true)"
