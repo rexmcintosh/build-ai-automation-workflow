@@ -1,0 +1,63 @@
+from __future__ import annotations
+from .models import Finding, MemberResult, Synthesis
+
+_MIN_CONF = {"daily": 8, "deep": 2}
+
+
+def gate_findings(findings: list[Finding], *, rigor: str):
+    """Return (shown, demoted). Critical always shown. daily: >=8 shown, 5-7 demoted,
+    <5 dropped. deep: >=2 shown (treat 2-7 as tentative), <2 dropped."""
+    shown, demoted = [], []
+    floor = _MIN_CONF.get(rigor, 8)
+    for f in findings:
+        if f.severity == "critical" or f.confidence >= floor:
+            shown.append(f)
+        elif rigor == "daily" and f.confidence >= 5:
+            demoted.append(f)
+        # else dropped
+    return shown, demoted
+
+
+def _finding_line(f: Finding, tentative=False) -> str:
+    tag = " _(tentative)_" if (tentative or f.confidence < 8) else ""
+    return f"- `{f.severity}` (c{f.confidence}) {f.point}{tag}"
+
+
+def render_markdown(question: str, syn: Synthesis, results: list[MemberResult],
+                    *, rigor: str = "daily") -> str:
+    out = ["## Council", "", f"**Question:** {question}", ""]
+    out += [f"### Recommendation (confidence {syn.confidence}/10)", "", syn.recommendation, ""]
+    if syn.consensus:
+        out += ["**Consensus:**"] + [f"- {c}" for c in syn.consensus] + [""]
+    if syn.cross_panel_themes:
+        out += ["**Cross-panel themes:**"] + [f"- {t}" for t in syn.cross_panel_themes] + [""]
+    for d in syn.disagreements:
+        out += [f"**Disagreement — {d.topic}** _({d.type})_", f"- positions: {d.positions}"]
+        if d.type == "user-challenge":
+            out += [f"- what we might be missing: {d.what_we_might_miss}",
+                    f"- if we're wrong, the cost is: {d.if_wrong_cost}"]
+        elif d.resolution:
+            out += [f"- chair's call: {d.resolution}"]
+        out += [""]
+    out += ["---", "", "<details><summary>Raw panel</summary>", ""]
+    for r in results:
+        out += [f"#### {r.member} · {r.model} — {r.stance}", "", f"_{r.headline}_", ""]
+        if r.error:
+            out += [f"_errored: {r.error}_", ""]
+            continue
+        shown, demoted = gate_findings(r.findings, rigor=rigor)
+        out += [_finding_line(f) for f in shown]
+        if demoted:
+            out += ["", "<sub>lower-confidence:</sub>"] + [_finding_line(f, True) for f in demoted]
+        if r.suggestions:
+            out += [""] + [f"- _(suggestion)_ {s}" for s in r.suggestions]
+        out += [""]
+    out += ["</details>"]
+    return "\n".join(out)
+
+
+def render_terminal(question: str, syn: Synthesis, results: list[MemberResult],
+                    *, rigor: str = "daily") -> str:
+    # Reuse markdown; terminals render it fine. Strip the <details> wrappers.
+    md = render_markdown(question, syn, results, rigor=rigor)
+    return md.replace("<details><summary>Raw panel</summary>", "── Raw panel ──").replace("</details>", "")
