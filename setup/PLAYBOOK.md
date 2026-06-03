@@ -5,6 +5,18 @@ A concrete, executable plan for the @levelsio × Naval hybrid:
 
 You stay solo. The agents argue. You ship from your phone.
 
+> **📍 This playbook is Phase 1 of a larger plan.** It stands up the VPS + Venice
+> review pipeline — where Claude Code writes and the council reviews. **Phase 2**
+> wraps it in a four-node *personal compute mesh* (VPS + Mac Mini + MacBook +
+> iPhone) so your work is reachable from any device, even with the Mini off.
+> The design of record and the rest of the build live in
+> [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — start there for the big
+> picture. Related Phase 2 docs:
+> [TAILSCALE](../docs/TAILSCALE.md) ·
+> [MAC-MINI-SETUP](../docs/MAC-MINI-SETUP.md) ·
+> [MIGRATION](../docs/MIGRATION.md) ·
+> [DAILY-LOOP](../docs/DAILY-LOOP.md).
+
 ---
 
 ## Architecture
