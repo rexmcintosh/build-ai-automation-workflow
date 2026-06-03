@@ -179,8 +179,8 @@ if [ -n "$TO_HOST" ]; then
   if [ "$DRY" = 1 ]; then
     printf '   %swould clone%s %s -> %s:~/%s/%s and start tmux session %s\n' \
       "$DIM" "$RST" "$RURL" "$TO_HOST" "$REMOTE_DIR" "$NAME" "$NAME"
-  elif ssh "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags --prune"; then
-    ssh "$TO_HOST" "tmux has-session -t '$NAME' 2>/dev/null || tmux new-session -d -s '$NAME' -c ~/$REMOTE_DIR/'$NAME'"
+  elif ssh -n "$TO_HOST" "mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR && { [ -d '$NAME/.git' ] || git clone '$RURL' '$NAME'; } && cd '$NAME' && git fetch --all --tags --prune"; then
+    ssh -n "$TO_HOST" "tmux has-session -t '$NAME' 2>/dev/null || tmux new-session -d -s '$NAME' -c ~/$REMOTE_DIR/'$NAME'"
     ok "On $TO_HOST: ~/$REMOTE_DIR/$NAME  (tmux session '$NAME')"
     printf '   attach with:  %sssh %s -t "tmux attach -t %s"%s\n' "$DIM" "$TO_HOST" "$NAME" "$RST"
   else
