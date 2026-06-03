@@ -1,0 +1,30 @@
+import importlib.util, pathlib
+from council.models import Panel, Member
+from tests.conftest import FakeClient
+
+# load the template module by path
+_spec = importlib.util.spec_from_file_location(
+    "venice_review", pathlib.Path("setup/templates/venice_review.py"))
+vr = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(vr)
+
+
+def test_build_review_blocks_on_high_severity(member_json):
+    panel = Panel("code-review", "review", [Member("Eng", "m1", "eng")])
+    client = FakeClient(by_model={
+        "m1": member_json(stance="oppose", headline="bug",
+                          findings=[("nil deref at api.py:10", "high", 9)]),
+        "c": {"recommendation": "fix the nil deref", "confidence": 9,
+              "consensus": [], "disagreements": [], "cross_panel_themes": []}})
+    body, blocking = vr.build_review("diff text", panel, client, chair_model="c")
+    assert "## Council" in body
+    assert blocking >= 1  # severity>=high counts as blocking → exit 1
+
+
+def test_build_review_clean_diff_no_block(member_json):
+    panel = Panel("code-review", "review", [Member("Eng", "m1", "eng")])
+    client = FakeClient(by_model={
+        "m1": member_json(stance="approve", headline="lgtm"),
+        "c": {"recommendation": "ship it", "confidence": 8,
+              "consensus": [], "disagreements": [], "cross_panel_themes": []}})
+    body, blocking = vr.build_review("diff", panel, client, chair_model="c")
+    assert blocking == 0

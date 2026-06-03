@@ -24,8 +24,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install deps
-        run: pip install --quiet requests
+      # When council is published to PyPI, simplify to: pip install council
+      - name: Install council
+        run: pip install --quiet "council @ git+https://github.com/rexmcintosh/build-ai-automation-workflow@main"
 
       - name: Compute diff
         id: diff
