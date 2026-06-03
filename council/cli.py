@@ -12,9 +12,10 @@ from .render import render_markdown, render_terminal
 
 
 def _build(panels_path=None):
+    # Config loads without any network/secret; the client is built lazily so
+    # local-only commands (e.g. `panels`) don't require VENICE_API_KEY.
     settings, panels = load_panels(panels_path)
-    client = VeniceClient(get_api_key(), timeout=settings.timeout)
-    return settings, panels, client
+    return settings, panels, None
 
 
 def _gather_context(question: str, files: list[str], cap: int) -> str:
@@ -73,6 +74,10 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
             seats = ", ".join(m.name for m in panel.members)
             print(f"{name:14} {panel.description}\n{'':14} seats: {seats}")
         return 0
+
+    # ask / review actually call Venice — build the client now (needs the key).
+    if client is None:
+        client = VeniceClient(get_api_key(), timeout=settings.timeout)
 
     if args.cmd == "ask":
         ctx = _gather_context(args.question, args.file, settings.byte_cap)

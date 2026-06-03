@@ -37,3 +37,16 @@ def test_ask_explicit_panel_overrides_router(capsys, member_json):
              _panels=panels, _client=client)
     # the router model "r" should never have been called
     assert all(c["model"] != "r" for c in client.calls)
+
+
+def test_panels_does_not_require_api_key(capsys, monkeypatch, tmp_path):
+    # Listing panels is a local-only operation: it must work with no key set,
+    # via the production path (no injected client) — the client is built lazily.
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    f = tmp_path / "panels.toml"
+    f.write_text('[settings]\ndefault_panel = "decision"\n\n'
+                 '[panels.decision]\ndescription = "weigh"\n'
+                 '[[panels.decision.members]]\nname = "Founder"\nmodel = "m1"\nsystem = "s"\n')
+    rc = cli.main(["panels", "--panels", str(f)])
+    assert rc == 0
+    assert "decision" in capsys.readouterr().out
