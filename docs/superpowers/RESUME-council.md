@@ -13,9 +13,35 @@ reviews/advises — on top of the Phase 1 Venice PR-review council
 
 | Piece | What | Status |
 |---|---|---|
-| **1. Engine + on-demand CLI** | reusable council engine + a `council` command (`ask`/`review`/`panels`) | **Designed + planned — ready to BUILD** |
+| **1. Engine + on-demand CLI** | reusable council engine + a `council` command (`ask`/`review`/`panels`) | **BUILT — 28 tests green, installed on VPS, draft [PR #2](https://github.com/rexmcintosh/build-ai-automation-workflow/pull/2) open (council reviewed itself)** |
 | 2. Review beyond code | run the panel on design docs / specs / plans | not started |
 | 3. Proactive proposing | scheduled agents that file issues / draft PRs | not started |
+
+### Piece 1 build notes (2026-06-03)
+
+Built TDD task-by-task off the plan; all 12 tasks done. Verified model IDs against
+Venice's live catalog (`council/panels.toml`: OpenAI/DeepSeek/xAI/Google/Claude;
+Adversary always non-Claude; router `gemini-3-5-flash`, chair `claude-opus-4-8`).
+Installed via `pipx install .` on the VPS. Live `council ask` / `council review`
+confirmed working. The PR is a **draft for the human to merge** — the council's own
+review said *request changes* (good, actionable). **Fast-follows the council flagged
+(beyond Piece 1 scope, not yet done):**
+
+- **Chair is intermittently flaky** — `synthesize` fails ~30-50% of CLI runs and
+  falls back to "synthesis unavailable" + raw panel (graceful degradation works).
+  Likely transient Venice 5xx/429 under the burst of 3 parallel member calls + chair;
+  the 2-retry budget isn't always enough. Fix: distinguish retryable status codes,
+  honor `Retry-After`, maybe bump chair retries.
+- **CI hardening** (for when `venice-review.yml` becomes active CI): pin the council
+  install to an immutable SHA/tag (not `@main`); ignore the `~/.config/council`
+  override on runners; gate the blocking check on confidence/agreement, not a raw
+  count of any high/critical finding.
+- **Input hardening** in `council review` on a directory: skip binary/oversized files,
+  per-file try/except, enforce byte budget during collection; wrap `git diff` with
+  return-code handling; redact the Authorization header / sanitize exception strings.
+
+Note: `setup/templates/venice-review.yml` is a **template**, not active CI in this
+repo, so the PR is not auto-reviewed — the self-review was run manually on the VPS.
 
 **Branch:** `feat/council` (pushed to GitHub; the VPS clone is on it too).
 
