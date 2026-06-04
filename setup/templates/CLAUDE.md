@@ -10,7 +10,20 @@
 - When the feature/fix is complete, open a **draft** PR with `gh pr create --draft --fill`.
 - A GitHub Action will run the Venice review council. The check is named `venice/review`.
 - Read the consolidated review comment. Address blocking items in fixup commits on the same branch.
-- Do **not** mark the PR ready and do **not** merge. The human merges.
+
+## Merging to `main`
+You may merge, but only on an explicit go-ahead:
+1. When a branch is merge-ready, post a compact **Merge recommendation** and STOP.
+2. If the human replies "do it" / "merge it" / "ship it" → execute the merge and report.
+3. Never merge on a weaker or implied signal.
+
+Merge recommendation format:
+```
+**Merge recommendation — <branch> → main**
+What:     <one line>     Verified: <tests, live checks, evidence>
+Risk:     <blast radius>  How: <squash | merge-commit | rebase>, delete branch? <y/n>
+→ say "do it" to merge.
+```
 
 ## Deploys
 - Merging to `main` triggers the deploy workflow. Don't try to deploy manually.
