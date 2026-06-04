@@ -28,12 +28,20 @@ class VeniceClient:
         self.temperature = temperature
         self._post = post or requests.post
 
+    def _scrub(self, text):
+        # Defense in depth: never let our own API key ride along in a prompt,
+        # however it got into the context (e.g. `ask --file .env`, a diff that
+        # includes the key). This is the single chokepoint every call passes.
+        if text and self.api_key:
+            return text.replace(self.api_key, "<redacted>")
+        return text
+
     def complete(self, model, system, user, *, json_mode=True):
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "system", "content": self._scrub(system)},
+                {"role": "user", "content": self._scrub(user)},
             ],
             "temperature": self.temperature,
         }

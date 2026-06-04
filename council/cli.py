@@ -55,7 +55,10 @@ def _read_for_review(path_arg: str, cap: int) -> str:
         if _looks_binary(f):
             continue
         try:
-            content = f.read_text(errors="ignore")
+            # Bounded read: never pull more than the whole budget from one file,
+            # so a single multi-GB file can't exhaust memory before truncation.
+            with open(f, "r", errors="ignore") as fh:
+                content = fh.read(cap + 1)
         except OSError:
             continue
         chunk = f"--- {f} ---\n{content}"
@@ -128,8 +131,14 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
 
     if args.cmd == "review":
         import subprocess
+        explicit_path = False
         if args.diff:
-            proc = subprocess.run(["git", "diff"], capture_output=True, text=True)
+            try:
+                proc = subprocess.run(["git", "diff"], capture_output=True,
+                                      text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                print("error: `git diff` timed out", file=sys.stderr)
+                return 2
             if proc.returncode != 0:
                 print(f"error: `git diff` failed: {proc.stderr.strip()}", file=sys.stderr)
                 return 2
@@ -137,9 +146,16 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
         elif args.path == "-" or args.path is None:
             text = sys.stdin.read()
         else:
+            explicit_path = True
             text = _read_for_review(args.path, settings.byte_cap)
         if not text.strip():
-            print("Nothing to review (empty diff / no readable files).", file=sys.stderr)
+            # An explicit path that matched nothing is likely an operator typo —
+            # fail (exit 2) instead of silently passing. A clean `git diff` /
+            # empty stdin is legitimately "nothing to do" → exit 0.
+            if explicit_path:
+                print(f"error: nothing readable to review at '{args.path}'.", file=sys.stderr)
+                return 2
+            print("Nothing to review (empty diff / no input).", file=sys.stderr)
             return 0
         ctx = truncate(f"Review this:\n\n{text}", settings.byte_cap)
         return _run(ctx, args.panel, settings, panels, client, args.rigor, args.format)

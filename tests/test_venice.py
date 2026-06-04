@@ -35,6 +35,18 @@ def test_complete_retries_then_raises():
     assert attempts["n"] == 3  # 1 try + 2 retries
 
 
+def test_complete_scrubs_api_key_from_prompt():
+    sent = {}
+    def fake_post(url, **kw):
+        sent["messages"] = kw["json"]["messages"]
+        return _resp('{"ok": true}')
+    c = VeniceClient(api_key="sk-secret-123", post=fake_post)
+    c.complete("m", "system has sk-secret-123 in it", "user also sk-secret-123")
+    blob = str(sent["messages"])
+    assert "sk-secret-123" not in blob
+    assert "<redacted>" in blob
+
+
 def test_complete_does_not_retry_on_4xx():
     # A 401/400 (auth / bad model) fails identically every time — fail fast,
     # don't burn 3x the billing retrying it.

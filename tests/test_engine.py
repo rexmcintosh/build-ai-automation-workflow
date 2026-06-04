@@ -49,3 +49,23 @@ def test_run_panel_tolerates_non_numeric_confidence():
     for r in results:
         assert r.error is None
         assert [f.confidence for f in r.findings] == [5, 5]  # coerced to default
+
+
+def test_run_panel_caps_worker_pool():
+    # A pathologically large custom panel must not spin up one thread per seat.
+    import council.engine as eng
+    captured = {}
+    real = eng.concurrent.futures.ThreadPoolExecutor
+
+    class Spy(real):
+        def __init__(self, *a, max_workers=None, **k):
+            captured["max_workers"] = max_workers
+            super().__init__(*a, max_workers=max_workers, **k)
+
+    eng.concurrent.futures.ThreadPoolExecutor = Spy
+    try:
+        big = Panel("big", "d", [Member(f"M{i}", "m", "s") for i in range(40)])
+        run_panel(big, "x", FakeClient(default={"stance": "na", "headline": "h"}))
+    finally:
+        eng.concurrent.futures.ThreadPoolExecutor = real
+    assert captured["max_workers"] == 8

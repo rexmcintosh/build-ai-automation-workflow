@@ -116,3 +116,12 @@ def test_ask_missing_file_errors_friendly(capsys, member_json):
                  _settings=settings, _panels=panels, _client=client)
     assert exc.value.code == 2
     assert "cannot read --file" in capsys.readouterr().err
+
+
+def test_review_explicit_missing_path_exits_2(capsys, member_json, tmp_path):
+    settings, panels, client = _env(member_json)
+    empty = tmp_path / "empty_dir"
+    empty.mkdir()
+    rc = cli.main(["review", str(empty)], _settings=settings, _panels=panels, _client=client)
+    assert rc == 2
+    assert "nothing readable to review" in capsys.readouterr().err

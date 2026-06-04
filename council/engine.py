@@ -41,7 +41,9 @@ def _ask_member(member: Member, context: str, client) -> MemberResult:
 
 
 def run_panel(panel: Panel, context: str, client, *, max_workers=None) -> list[MemberResult]:
-    workers = max_workers or max(1, len(panel.members))
+    # Cap concurrency so an oversized custom panel can't open a thread / rate-limit
+    # storm; real panels are 3-4 seats so this is a safety bound, not a throttle.
+    workers = max_workers or min(8, max(1, len(panel.members)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_ask_member, m, context, client): m for m in panel.members}
         results = [f.result() for f in concurrent.futures.as_completed(futures)]

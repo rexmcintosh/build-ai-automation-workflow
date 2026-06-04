@@ -36,7 +36,9 @@ def build_review(diff: str, panel, client, *, chair_model: str):
     # review didn't really happen — a Venice outage / bad model id must NOT pass
     # the merge gate with 0 findings.
     errored = sum(1 for r in results if r.error)
-    unavailable = syn.error is not None or (results and errored * 2 >= len(results))
+    unavailable = (syn.error is not None
+                   or not results               # empty/misconfigured panel — zero reviewers
+                   or errored * 2 >= len(results))  # half or more of the panel failed
     return body, blocking, unavailable
 
 
