@@ -24,9 +24,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # When council is published to PyPI, simplify to: pip install council
+      # Pinned to an immutable release tag so the merge gate is reproducible.
+      # Bump intentionally on each council release. (When published to PyPI,
+      # simplify to a pinned: pip install "council==X.Y.Z".)
       - name: Install council
-        run: pip install --quiet "council @ git+https://github.com/rexmcintosh/build-ai-automation-workflow@main"
+        run: pip install --quiet "council @ git+https://github.com/rexmcintosh/build-ai-automation-workflow@council-v0.1.0"
 
       - name: Compute diff
         id: diff
