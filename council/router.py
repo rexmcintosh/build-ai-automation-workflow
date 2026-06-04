@@ -1,7 +1,7 @@
 from __future__ import annotations
-import json
 
 from .prompts import ROUTER_PROMPT
+from .jsonparse import loads_lenient
 
 
 def pick_panel(context: str, panels: dict, client, *, router_model: str,
@@ -10,7 +10,7 @@ def pick_panel(context: str, panels: dict, client, *, router_model: str,
     system = ROUTER_PROMPT + listing
     try:
         raw = client.complete(router_model, system, context[:snippet_chars])
-        name = json.loads(raw).get("panel", "")
+        name = loads_lenient(raw).get("panel", "")
         return name if name in panels else default
     except Exception:  # noqa: BLE001
         return default

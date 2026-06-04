@@ -60,3 +60,36 @@ def test_panels_does_not_require_api_key(capsys, monkeypatch, tmp_path):
     rc = cli.main(["panels", "--panels", str(f)])
     assert rc == 0
     assert "decision" in capsys.readouterr().out
+
+
+def test_read_for_review_skips_dotfiles_and_binary(tmp_path):
+    (tmp_path / "keep.py").write_text("print('hi')\n")
+    (tmp_path / ".env").write_text("VENICE_API_KEY=secret-should-never-be-sent\n")
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00\x00binary\x00data")
+    text = cli._read_for_review(str(tmp_path), cap=200_000)
+    assert "keep.py" in text and "print('hi')" in text
+    assert "secret-should-never-be-sent" not in text  # dotfile excluded
+    assert "logo.png" not in text                      # binary excluded
+
+
+def test_read_for_review_enforces_byte_budget(tmp_path):
+    for i in range(50):
+        (tmp_path / f"f{i}.txt").write_text("x" * 1000)
+    text = cli._read_for_review(str(tmp_path), cap=5000)
+    assert "stopped collecting" in text
+    assert len(text.encode()) < 5000 * 3  # bounded during collection, not unbounded
+
+
+def test_review_diff_surfaces_git_failure(capsys, member_json, monkeypatch):
+    settings, panels, client = _env(member_json)
+    import subprocess, pytest
+
+    class _Proc:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+    rc = cli.main(["review", "--diff"], _settings=settings, _panels=panels, _client=client)
+    assert rc == 2
+    assert "git diff` failed" in capsys.readouterr().err

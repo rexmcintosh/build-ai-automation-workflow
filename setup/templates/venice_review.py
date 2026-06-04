@@ -17,14 +17,21 @@ from council.synthesize import synthesize
 from council.render import render_markdown
 
 GITHUB_API = "https://api.github.com"
-_BLOCKING = {"high", "critical"}
+
+
+def _is_blocking(finding) -> bool:
+    """A finding blocks merge only if it would also be SHOWN in the posted
+    comment (daily rigor): any `critical`, or a `high` the panelist is confident
+    in (>=8). This keeps a low-confidence `high` from failing CI invisibly."""
+    return finding.severity == "critical" or (
+        finding.severity == "high" and finding.confidence >= 8)
 
 
 def build_review(diff: str, panel, client, *, chair_model: str):
     results = run_panel(panel, f"Review this pull request diff:\n\n```diff\n{diff}\n```", client)
     syn = synthesize("PR diff review", results, client, chair_model=chair_model)
     body = render_markdown("Pull request review", syn, results, rigor=panel.default_rigor)
-    blocking = sum(1 for r in results for f in r.findings if f.severity in _BLOCKING)
+    blocking = sum(1 for r in results for f in r.findings if _is_blocking(f))
     return body, blocking
 
 

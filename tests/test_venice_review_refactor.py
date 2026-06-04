@@ -28,3 +28,28 @@ def test_build_review_clean_diff_no_block(member_json):
               "consensus": [], "disagreements": [], "cross_panel_themes": []}})
     body, blocking = vr.build_review("diff", panel, client, chair_model="c")
     assert blocking == 0
+
+
+def test_build_review_low_confidence_high_does_not_block(member_json):
+    # A low-confidence `high` is dropped from the daily-rigor comment, so it must
+    # not fail CI invisibly — only confident highs / any critical block.
+    panel = Panel("code-review", "review", [Member("Eng", "m1", "eng")])
+    client = FakeClient(by_model={
+        "m1": member_json(stance="concerns", headline="maybe",
+                          findings=[("speculative high at x.py:1", "high", 3)]),
+        "c": {"recommendation": "ok", "confidence": 7,
+              "consensus": [], "disagreements": [], "cross_panel_themes": []}})
+    _, blocking = vr.build_review("diff", panel, client, chair_model="c")
+    assert blocking == 0
+
+
+def test_build_review_low_confidence_critical_still_blocks(member_json):
+    # A single critical always blocks (and is always shown), even at low confidence.
+    panel = Panel("code-review", "review", [Member("Eng", "m1", "eng")])
+    client = FakeClient(by_model={
+        "m1": member_json(stance="oppose", headline="rce",
+                          findings=[("possible RCE at x.py:9", "critical", 2)]),
+        "c": {"recommendation": "fix", "confidence": 6,
+              "consensus": [], "disagreements": [], "cross_panel_themes": []}})
+    _, blocking = vr.build_review("diff", panel, client, chair_model="c")
+    assert blocking == 1

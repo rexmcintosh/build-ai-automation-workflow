@@ -28,6 +28,39 @@ def _gather_context(question: str, files: list[str], cap: int) -> str:
     return truncate("\n\n".join(parts), cap)
 
 
+def _looks_binary(path: Path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(4096)
+    except OSError:
+        return True
+
+
+def _read_for_review(path_arg: str, cap: int) -> str:
+    """Read a file or directory into review text. Skips dotfiles (.env/.git),
+    binary and unreadable files, and enforces the byte budget DURING collection
+    so a huge tree can't build a giant string before truncation."""
+    pth = Path(path_arg)
+    files = sorted(pth.rglob("*")) if pth.is_dir() else [pth]
+    parts, used = [], 0
+    for f in files:
+        if not f.is_file() or any(p.startswith(".") for p in f.parts):
+            continue
+        if _looks_binary(f):
+            continue
+        try:
+            content = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        chunk = f"--- {f} ---\n{content}"
+        parts.append(chunk)
+        used += len(chunk.encode("utf-8", errors="ignore"))
+        if used >= cap:
+            parts.append(f"\n... [stopped collecting at {cap} bytes] ...")
+            break
+    return "\n\n".join(parts)
+
+
 def _run(context, panel_name, settings, panels, client, rigor, fmt):
     if panel_name is None:
         panel_name = pick_panel(context, panels, client,
@@ -90,17 +123,15 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
     if args.cmd == "review":
         import subprocess
         if args.diff:
-            text = subprocess.run(["git", "diff"], capture_output=True, text=True).stdout
+            proc = subprocess.run(["git", "diff"], capture_output=True, text=True)
+            if proc.returncode != 0:
+                print(f"error: `git diff` failed: {proc.stderr.strip()}", file=sys.stderr)
+                return 2
+            text = proc.stdout
         elif args.path == "-" or args.path is None:
             text = sys.stdin.read()
         else:
-            pth = Path(args.path)
-            files = pth.rglob("*") if pth.is_dir() else [pth]
-            text = "\n\n".join(
-                f"--- {f} ---\n{f.read_text(errors='ignore')}"
-                for f in files
-                # skip dotfiles/dirs so we never feed .env, .git, etc. to the panel
-                if f.is_file() and not any(part.startswith(".") for part in f.parts))
+            text = _read_for_review(args.path, settings.byte_cap)
         if not text.strip():
             print("Nothing to review (empty diff / no readable files).", file=sys.stderr)
             return 0

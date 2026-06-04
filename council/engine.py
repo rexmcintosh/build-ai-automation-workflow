@@ -1,9 +1,9 @@
 from __future__ import annotations
 import concurrent.futures
-import json
 
 from .models import Member, Panel, Finding, MemberResult
 from .prompts import MEMBER_OUTPUT
+from .jsonparse import loads_lenient
 
 
 def _as_int(value, default: int = 5) -> int:
@@ -21,7 +21,7 @@ def _ask_member(member: Member, context: str, client) -> MemberResult:
             member.system + "\n\n" + MEMBER_OUTPUT,
             f"Here is the input to weigh in on:\n\n{context}",
         )
-        data = json.loads(raw)
+        data = loads_lenient(raw)
         findings = [
             Finding(point=str(f.get("point", "")),
                     severity=str(f.get("severity", "info")),

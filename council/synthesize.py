@@ -1,8 +1,8 @@
 from __future__ import annotations
-import json
 
 from .models import MemberResult, Disagreement, Synthesis
 from .prompts import SYNTH_OUTPUT
+from .jsonparse import loads_lenient
 
 
 def _as_int(value, default: int = 5) -> int:
@@ -34,7 +34,7 @@ def synthesize(context: str, results: list[MemberResult], client, *, chair_model
             f"{_panel_digest(results)}")
     try:
         raw = client.complete(chair_model, SYNTH_OUTPUT, user)
-        d = json.loads(raw)
+        d = loads_lenient(raw)
         dis = [Disagreement(
             topic=str(x.get("topic", "")), type=str(x.get("type", "taste")),
             positions=str(x.get("positions", "")), resolution=str(x.get("resolution", "")),

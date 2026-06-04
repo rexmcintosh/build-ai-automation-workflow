@@ -26,6 +26,18 @@ def test_synthesize_parses_chair_json():
     assert s.error is None
 
 
+def test_synthesize_recovers_markdown_fenced_json():
+    # Reproduces the real failure: the chair (claude-opus-4-8) wraps its JSON in
+    # a ```json fence ~75% of the time. The lenient parser must recover it.
+    fenced = ('```json\n{"recommendation": "do X", "confidence": 7, '
+              '"consensus": [], "disagreements": [], "cross_panel_themes": []}\n```')
+    client = FakeClient(default=fenced)
+    s = synthesize("x", _results(), client, chair_model="c")
+    assert s.error is None
+    assert s.recommendation == "do X"
+    assert s.confidence == 7
+
+
 def test_synthesize_falls_back_on_error():
     client = FakeClient(raises_for={"c"})
     s = synthesize("x", _results(), client, chair_model="c")
