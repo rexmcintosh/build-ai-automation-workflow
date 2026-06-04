@@ -1,0 +1,127 @@
+from council import cli
+from council.models import Panel, Member
+from council.config import Settings
+from tests.conftest import FakeClient
+
+
+def _env(member_json):
+    settings = Settings(default_panel="decision", router_model="r", chair_model="c")
+    panels = {"decision": Panel("decision", "weigh", [Member("Founder", "m1", "founder")]),
+              "code-review": Panel("code-review", "review", [Member("Eng", "m1", "eng")])}
+    client = FakeClient(
+        by_model={"m1": member_json(stance="approve", headline="go"),
+                  "r": {"panel": "decision"},
+                  "c": {"recommendation": "do X", "confidence": 8, "consensus": [],
+                        "disagreements": [], "cross_panel_themes": []}})
+    return settings, panels, client
+
+
+def test_ask_runs_and_prints_recommendation(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    rc = cli.main(["ask", "ship X?"], _settings=settings, _panels=panels, _client=client)
+    assert rc == 0
+    assert "do X" in capsys.readouterr().out
+
+
+def test_panels_lists_names(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    rc = cli.main(["panels"], _settings=settings, _panels=panels, _client=client)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "decision" in out and "code-review" in out
+
+
+def test_ask_explicit_panel_overrides_router(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    cli.main(["ask", "x", "--panel", "code-review"], _settings=settings,
+             _panels=panels, _client=client)
+    # the router model "r" should never have been called
+    assert all(c["model"] != "r" for c in client.calls)
+
+
+def test_ask_unknown_panel_errors_friendly(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ask", "x", "--panel", "nope"], _settings=settings,
+                 _panels=panels, _client=client)
+    assert exc.value.code == 2
+    assert "unknown panel" in capsys.readouterr().err
+
+
+def test_panels_does_not_require_api_key(capsys, monkeypatch, tmp_path):
+    # Listing panels is a local-only operation: it must work with no key set,
+    # via the production path (no injected client) — the client is built lazily.
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    f = tmp_path / "panels.toml"
+    f.write_text('[settings]\ndefault_panel = "decision"\n\n'
+                 '[panels.decision]\ndescription = "weigh"\n'
+                 '[[panels.decision.members]]\nname = "Founder"\nmodel = "m1"\nsystem = "s"\n')
+    rc = cli.main(["panels", "--panels", str(f)])
+    assert rc == 0
+    assert "decision" in capsys.readouterr().out
+
+
+def test_read_for_review_skips_dotfiles_and_binary(tmp_path):
+    (tmp_path / "keep.py").write_text("print('hi')\n")
+    (tmp_path / ".env").write_text("VENICE_API_KEY=secret-should-never-be-sent\n")
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00\x00binary\x00data")
+    text = cli._read_for_review(str(tmp_path), cap=200_000)
+    assert "keep.py" in text and "print('hi')" in text
+    assert "secret-should-never-be-sent" not in text  # dotfile excluded
+    assert "logo.png" not in text                      # binary excluded
+
+
+def test_read_for_review_enforces_byte_budget(tmp_path):
+    for i in range(50):
+        (tmp_path / f"f{i}.txt").write_text("x" * 1000)
+    text = cli._read_for_review(str(tmp_path), cap=5000)
+    assert "stopped collecting" in text
+    assert len(text.encode()) < 5000 * 3  # bounded during collection, not unbounded
+
+
+def test_review_diff_surfaces_git_failure(capsys, member_json, monkeypatch):
+    settings, panels, client = _env(member_json)
+    import subprocess, pytest
+
+    class _Proc:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+    rc = cli.main(["review", "--diff"], _settings=settings, _panels=panels, _client=client)
+    assert rc == 2
+    assert "git diff` failed" in capsys.readouterr().err
+
+
+def test_read_for_review_skips_symlinks(tmp_path):
+    import os
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "real.py").write_text("print('ok')\n")
+    secret = tmp_path / "secret.txt"           # OUTSIDE the reviewed tree
+    secret.write_text("exfiltrate me")
+    os.symlink(secret, repo / "link.txt")      # only reachable by following the symlink
+    text = cli._read_for_review(str(repo), cap=200_000)
+    assert "real.py" in text
+    assert "exfiltrate me" not in text  # symlink not followed
+
+
+def test_ask_missing_file_errors_friendly(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ask", "review this", "--file", "/no/such/file.txt"],
+                 _settings=settings, _panels=panels, _client=client)
+    assert exc.value.code == 2
+    assert "cannot read --file" in capsys.readouterr().err
+
+
+def test_review_explicit_missing_path_exits_2(capsys, member_json, tmp_path):
+    settings, panels, client = _env(member_json)
+    empty = tmp_path / "empty_dir"
+    empty.mkdir()
+    rc = cli.main(["review", str(empty)], _settings=settings, _panels=panels, _client=client)
+    assert rc == 2
+    assert "nothing readable to review" in capsys.readouterr().err

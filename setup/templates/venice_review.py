@@ -1,215 +1,70 @@
-"""Venice AI multi-agent PR reviewer.
+"""Venice review council — GitHub Action front-end on the `council` engine.
 
-Fans out the PR diff to a panel of specialist personas, each backed by a
-different Venice model, then aggregates verdicts into one consolidated PR
-comment and a check status.
+Runs the `code-review` panel over a PR diff, posts one consolidated comment,
+and exits 1 when there are blocking findings (severity >= high).
 
-Required env:
-  VENICE_API_KEY   Venice API key (repo secret)
-  GITHUB_TOKEN     Provided by Actions
-  PR_NUMBER, REPO, DIFF_PATH
-
-Tune the panel below.
+Required env: VENICE_API_KEY, GITHUB_TOKEN, PR_NUMBER, REPO, DIFF_PATH
 """
-
 from __future__ import annotations
-
-import concurrent.futures
-import json
-import os
-import sys
-import textwrap
-from dataclasses import dataclass
+import os, sys
 from pathlib import Path
 
 import requests
+from council.config import load_panels, get_api_key, truncate
+from council.venice import VeniceClient
+from council.engine import run_panel
+from council.synthesize import synthesize
+from council.render import render_markdown
 
-VENICE_API = "https://api.venice.ai/api/v1/chat/completions"
 GITHUB_API = "https://api.github.com"
 
-MAX_DIFF_BYTES = 200_000  # cap per-reviewer; larger PRs get head+tail
+
+def _is_blocking(finding) -> bool:
+    """A finding blocks merge only if it would also be SHOWN in the posted
+    comment (daily rigor): any `critical`, or a `high` the panelist is confident
+    in (>=8). This keeps a low-confidence `high` from failing CI invisibly."""
+    return finding.severity == "critical" or (
+        finding.severity == "high" and finding.confidence >= 8)
 
 
-@dataclass
-class Reviewer:
-    name: str
-    model: str
-    lens: str  # short label shown in the PR comment
-    system: str  # persona prompt
+def build_review(diff: str, panel, client, *, chair_model: str):
+    results = run_panel(panel, f"Review this pull request diff:\n\n```diff\n{diff}\n```", client)
+    syn = synthesize("PR diff review", results, client, chair_model=chair_model)
+    body = render_markdown("Pull request review", syn, results, rigor=panel.default_rigor)
+    blocking = sum(1 for r in results for f in r.findings if _is_blocking(f))
+    # Fail CLOSED: if the chair errored or half-or-more of the panel failed, the
+    # review didn't really happen — a Venice outage / bad model id must NOT pass
+    # the merge gate with 0 findings.
+    errored = sum(1 for r in results if r.error)
+    unavailable = (syn.error is not None
+                   or not results               # empty/misconfigured panel — zero reviewers
+                   or errored * 2 >= len(results))  # half or more of the panel failed
+    return body, blocking, unavailable
 
 
-PANEL: list[Reviewer] = [
-    Reviewer(
-        name="Architect",
-        model="claude-opus-4-7",
-        lens="design & coherence",
-        system=(
-            "You are a staff engineer reviewing a pull request. Your lens is "
-            "DESIGN COHERENCE. You ask: does this change belong in this layer? "
-            "Are the abstractions earned by the actual requirements, or "
-            "speculative? Is there an obvious simpler shape? Be terse and "
-            "concrete; point at lines."
-        ),
-    ),
-    Reviewer(
-        name="BugHunter",
-        model="gpt-5.2-codex",
-        lens="correctness & edge cases",
-        system=(
-            "You are an adversarial code reviewer. Your lens is CORRECTNESS. "
-            "Hunt for off-by-ones, null/undefined paths, race conditions, "
-            "missing error handling, incorrect type assumptions, and edge "
-            "cases the author probably didn't test. Only flag real bugs, not "
-            "style."
-        ),
-    ),
-    Reviewer(
-        name="Security",
-        model="deepseek-3.2",
-        lens="security",
-        system=(
-            "You are a security-focused reviewer. Look for: injection (SQL, "
-            "shell, prompt), authn/authz bypass, secrets in code or logs, "
-            "unsafe deserialization, SSRF, open redirects, insecure crypto, "
-            "missing input validation at trust boundaries. Ignore "
-            "nice-to-haves; flag only real risk."
-        ),
-    ),
-    Reviewer(
-        name="Simplifier",
-        model="qwen-3.6-27b",
-        lens="simplicity",
-        system=(
-            "You are a reviewer obsessed with SIMPLICITY. Flag: over-"
-            "engineering, premature abstraction, dead code, unused params, "
-            "speculative generality, comments that restate the code, and "
-            "anything that could be three lines instead of thirty."
-        ),
-    ),
-]
-
-OUTPUT_INSTRUCTIONS = textwrap.dedent("""\
-    Respond with ONLY a JSON object (no markdown, no prose around it):
-    {
-      "verdict": "approve" | "comment" | "request_changes",
-      "summary": "one sentence",
-      "blocking": ["each item: short, with file:line if possible"],
-      "suggestions": ["each item: short, with file:line if possible"]
-    }
-    Use "blocking" only for issues that should block merge. Use "suggestions"
-    for nits and optional improvements. Keep each list <= 5 items.
-""")
-
-
-def truncate_diff(diff: str) -> str:
-    b = diff.encode("utf-8", errors="ignore")
-    if len(b) <= MAX_DIFF_BYTES:
-        return diff
-    head = b[: MAX_DIFF_BYTES // 2].decode("utf-8", errors="ignore")
-    tail = b[-MAX_DIFF_BYTES // 2 :].decode("utf-8", errors="ignore")
-    return f"{head}\n\n... [diff truncated, {len(b)} bytes total] ...\n\n{tail}"
-
-
-def call_venice(reviewer: Reviewer, diff: str, api_key: str) -> dict:
-    payload = {
-        "model": reviewer.model,
-        "messages": [
-            {"role": "system", "content": reviewer.system + "\n\n" + OUTPUT_INSTRUCTIONS},
-            {"role": "user", "content": f"Review this pull request diff:\n\n```diff\n{diff}\n```"},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    try:
-        r = requests.post(VENICE_API, headers=headers, json=payload, timeout=180)
-        r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except Exception as e:
-        return {
-            "verdict": "comment",
-            "summary": f"(reviewer errored: {type(e).__name__})",
-            "blocking": [],
-            "suggestions": [],
-            "_error": str(e),
-        }
-
-
-def render_comment(results: list[tuple[Reviewer, dict]]) -> str:
-    verdicts = {r.name: res.get("verdict", "comment") for r, res in results}
-    total_blocking = sum(len(res.get("blocking", [])) for _, res in results)
-
-    if total_blocking == 0 and all(v == "approve" for v in verdicts.values()):
-        headline = "All reviewers approve. Safe to merge."
-    elif total_blocking == 0:
-        headline = "No blocking issues. See suggestions below."
-    else:
-        headline = f"{total_blocking} blocking issue(s) raised. See details below."
-
-    parts = [
-        "## Venice Review Council",
-        "",
-        f"**{headline}**",
-        "",
-        "| Reviewer | Lens | Verdict | Blocking | Suggestions |",
-        "|---|---|---|---:|---:|",
-    ]
-    for r, res in results:
-        parts.append(
-            f"| {r.name} | {r.lens} | `{res.get('verdict', '?')}` | "
-            f"{len(res.get('blocking', []))} | {len(res.get('suggestions', []))} |"
-        )
-
-    for r, res in results:
-        parts += ["", f"<details><summary><b>{r.name}</b> · {r.model} · {r.lens}</summary>", ""]
-        if summary := res.get("summary"):
-            parts += [f"_{summary}_", ""]
-        if blocking := res.get("blocking"):
-            parts += ["**Blocking:**"] + [f"- {b}" for b in blocking] + [""]
-        if suggestions := res.get("suggestions"):
-            parts += ["**Suggestions:**"] + [f"- {s}" for s in suggestions] + [""]
-        if err := res.get("_error"):
-            parts += [f"_error: {err}_", ""]
-        parts.append("</details>")
-
-    return "\n".join(parts)
-
-
-def post_pr_comment(repo: str, pr_number: str, body: str, token: str) -> None:
-    url = f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments"
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-        json={"body": body},
-        timeout=30,
-    )
-    r.raise_for_status()
+def post_comment(repo, pr, body, token):
+    requests.post(f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments",
+                  headers={"Authorization": f"Bearer {token}",
+                           "Accept": "application/vnd.github+json"},
+                  json={"body": body}, timeout=30).raise_for_status()
 
 
 def main() -> int:
-    api_key = os.environ["VENICE_API_KEY"]
-    gh_token = os.environ["GITHUB_TOKEN"]
-    pr_number = os.environ["PR_NUMBER"]
-    repo = os.environ["REPO"]
-    diff = truncate_diff(Path(os.environ["DIFF_PATH"]).read_text())
-
+    settings, panels = load_panels()
+    diff = truncate(Path(os.environ["DIFF_PATH"]).read_text(), settings.byte_cap)
     if not diff.strip():
         print("Empty diff, nothing to review.")
         return 0
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(PANEL)) as pool:
-        futures = {pool.submit(call_venice, r, diff, api_key): r for r in PANEL}
-        results = [(futures[f], f.result()) for f in concurrent.futures.as_completed(futures)]
-
-    results.sort(key=lambda x: [r.name for r in PANEL].index(x[0].name))
-
-    body = render_comment(results)
-    post_pr_comment(repo, pr_number, body, gh_token)
-
-    total_blocking = sum(len(res.get("blocking", [])) for _, res in results)
-    if total_blocking > 0:
-        print(f"::error::{total_blocking} blocking issue(s) raised by review council", file=sys.stderr)
+    client = VeniceClient(get_api_key(), timeout=settings.timeout)
+    body, blocking, unavailable = build_review(diff, panels["code-review"], client,
+                                               chair_model=settings.chair_model)
+    post_comment(os.environ["REPO"], os.environ["PR_NUMBER"], body, os.environ["GITHUB_TOKEN"])
+    if unavailable:
+        print("::error::review council unavailable (chair or panel failed) — failing closed",
+              file=sys.stderr)
+        return 1
+    if blocking:
+        print(f"::error::{blocking} blocking finding(s) from the review council", file=sys.stderr)
         return 1
     return 0
 
