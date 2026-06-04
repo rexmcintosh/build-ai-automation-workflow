@@ -24,7 +24,11 @@ def _gather_context(question: str, files: list[str], cap: int) -> str:
         if fp == "-":
             parts.append("--- stdin ---\n" + sys.stdin.read())
         else:
-            parts.append(f"--- {fp} ---\n" + Path(fp).read_text(errors="ignore"))
+            try:
+                parts.append(f"--- {fp} ---\n" + Path(fp).read_text(errors="ignore"))
+            except OSError as e:
+                print(f"error: cannot read --file {fp}: {e}", file=sys.stderr)
+                raise SystemExit(2)
     return truncate("\n\n".join(parts), cap)
 
 
@@ -44,6 +48,8 @@ def _read_for_review(path_arg: str, cap: int) -> str:
     files = sorted(pth.rglob("*")) if pth.is_dir() else [pth]
     parts, used = [], 0
     for f in files:
+        if f.is_symlink():
+            continue  # never follow a symlink out of the tree to the API
         if not f.is_file() or any(p.startswith(".") for p in f.parts):
             continue
         if _looks_binary(f):

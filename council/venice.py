@@ -4,6 +4,10 @@ import requests
 
 VENICE_API = "https://api.venice.ai/api/v1/chat/completions"
 
+# Only these are worth retrying — a 4xx (bad model name, auth, bad request) will
+# fail identically every time, so retrying just burns time and billing.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
 
 class VeniceError(RuntimeError):
     pass
@@ -42,10 +46,24 @@ class VeniceClient:
             try:
                 r = self._post(self.base_url, headers=headers, json=payload,
                                timeout=self.timeout)
-                r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"]
-            except Exception as e:  # noqa: BLE001 — bounded retry on any failure
+            except Exception as e:  # network/connection/timeout — retryable
                 last = e
                 if attempt < self.retries:
                     time.sleep(self.backoff * (attempt + 1))
+                continue
+            status = getattr(r, "status_code", 200)
+            if status in _RETRYABLE_STATUS:
+                last = VeniceError(f"HTTP {status}")
+                if attempt < self.retries:
+                    time.sleep(self.backoff * (attempt + 1))
+                continue
+            # Non-retryable: a 2xx success, or a 4xx that won't change on retry.
+            try:
+                r.raise_for_status()
+            except Exception as e:  # noqa: BLE001
+                raise VeniceError(f"Venice HTTP {status} (not retryable): {e}") from e
+            try:
+                return r.json()["choices"][0]["message"]["content"]
+            except Exception as e:  # noqa: BLE001 — malformed envelope won't fix on retry
+                raise VeniceError(f"Venice returned an unparseable response: {e}") from e
         raise VeniceError(f"Venice call failed after {self.retries + 1} tries: {last}")

@@ -33,3 +33,27 @@ def test_complete_retries_then_raises():
     with pytest.raises(VeniceError):
         c.complete("m", "s", "u")
     assert attempts["n"] == 3  # 1 try + 2 retries
+
+
+def test_complete_does_not_retry_on_4xx():
+    # A 401/400 (auth / bad model) fails identically every time — fail fast,
+    # don't burn 3x the billing retrying it.
+    attempts = {"n": 0}
+    def auth_fail_post(url, **kw):
+        attempts["n"] += 1
+        return _resp("", status=401)
+    c = VeniceClient(api_key="k", post=auth_fail_post, retries=2, backoff=0)
+    with pytest.raises(VeniceError):
+        c.complete("m", "s", "u")
+    assert attempts["n"] == 1  # no retries on 4xx
+
+
+def test_complete_retries_on_5xx():
+    attempts = {"n": 0}
+    def server_error_post(url, **kw):
+        attempts["n"] += 1
+        return _resp("", status=503)
+    c = VeniceClient(api_key="k", post=server_error_post, retries=2, backoff=0)
+    with pytest.raises(VeniceError):
+        c.complete("m", "s", "u")
+    assert attempts["n"] == 3  # 503 is retryable

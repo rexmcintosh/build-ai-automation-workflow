@@ -93,3 +93,26 @@ def test_review_diff_surfaces_git_failure(capsys, member_json, monkeypatch):
     rc = cli.main(["review", "--diff"], _settings=settings, _panels=panels, _client=client)
     assert rc == 2
     assert "git diff` failed" in capsys.readouterr().err
+
+
+def test_read_for_review_skips_symlinks(tmp_path):
+    import os
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "real.py").write_text("print('ok')\n")
+    secret = tmp_path / "secret.txt"           # OUTSIDE the reviewed tree
+    secret.write_text("exfiltrate me")
+    os.symlink(secret, repo / "link.txt")      # only reachable by following the symlink
+    text = cli._read_for_review(str(repo), cap=200_000)
+    assert "real.py" in text
+    assert "exfiltrate me" not in text  # symlink not followed
+
+
+def test_ask_missing_file_errors_friendly(capsys, member_json):
+    settings, panels, client = _env(member_json)
+    import pytest
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ask", "review this", "--file", "/no/such/file.txt"],
+                 _settings=settings, _panels=panels, _client=client)
+    assert exc.value.code == 2
+    assert "cannot read --file" in capsys.readouterr().err

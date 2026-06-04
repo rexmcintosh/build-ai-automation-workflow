@@ -32,7 +32,12 @@ def build_review(diff: str, panel, client, *, chair_model: str):
     syn = synthesize("PR diff review", results, client, chair_model=chair_model)
     body = render_markdown("Pull request review", syn, results, rigor=panel.default_rigor)
     blocking = sum(1 for r in results for f in r.findings if _is_blocking(f))
-    return body, blocking
+    # Fail CLOSED: if the chair errored or half-or-more of the panel failed, the
+    # review didn't really happen — a Venice outage / bad model id must NOT pass
+    # the merge gate with 0 findings.
+    errored = sum(1 for r in results if r.error)
+    unavailable = syn.error is not None or (results and errored * 2 >= len(results))
+    return body, blocking, unavailable
 
 
 def post_comment(repo, pr, body, token):
@@ -49,9 +54,13 @@ def main() -> int:
         print("Empty diff, nothing to review.")
         return 0
     client = VeniceClient(get_api_key(), timeout=settings.timeout)
-    body, blocking = build_review(diff, panels["code-review"], client,
-                                  chair_model=settings.chair_model)
+    body, blocking, unavailable = build_review(diff, panels["code-review"], client,
+                                               chair_model=settings.chair_model)
     post_comment(os.environ["REPO"], os.environ["PR_NUMBER"], body, os.environ["GITHUB_TOKEN"])
+    if unavailable:
+        print("::error::review council unavailable (chair or panel failed) — failing closed",
+              file=sys.stderr)
+        return 1
     if blocking:
         print(f"::error::{blocking} blocking finding(s) from the review council", file=sys.stderr)
         return 1
