@@ -24,21 +24,30 @@ Venice's live catalog (`council/panels.toml`: OpenAI/DeepSeek/xAI/Google/Claude;
 Adversary always non-Claude; router `gemini-3-5-flash`, chair `claude-opus-4-8`).
 Installed via `pipx install .` on the VPS. Live `council ask` / `council review`
 confirmed working. The PR is a **draft for the human to merge** — the council's own
-review said *request changes* (good, actionable). **Fast-follows the council flagged
-(beyond Piece 1 scope, not yet done):**
+review said *request changes* (good, actionable).
 
-- **Chair is intermittently flaky** — `synthesize` fails ~30-50% of CLI runs and
-  falls back to "synthesis unavailable" + raw panel (graceful degradation works).
-  Likely transient Venice 5xx/429 under the burst of 3 parallel member calls + chair;
-  the 2-retry budget isn't always enough. Fix: distinguish retryable status codes,
-  honor `Retry-After`, maybe bump chair retries.
-- **CI hardening** (for when `venice-review.yml` becomes active CI): pin the council
-  install to an immutable SHA/tag (not `@main`); ignore the `~/.config/council`
-  override on runners; gate the blocking check on confidence/agreement, not a raw
-  count of any high/critical finding.
-- **Input hardening** in `council review` on a directory: skip binary/oversized files,
-  per-file try/except, enforce byte budget during collection; wrap `git diff` with
-  return-code handling; redact the Authorization header / sanitize exception strings.
+**Self-review findings — DONE (commit `cf257f4`):**
+
+- **Chair flakiness — root-caused & fixed.** It was NOT transient HTTP (httpfail=0
+  across 8 probes): `claude-opus-4-8` wraps its JSON in a markdown ```` ```json ````
+  fence ~75% of runs despite `json_object` mode, so `json.loads` failed and synthesis
+  silently degraded. Fix: `council/jsonparse.loads_lenient` (strip fence / extract
+  object), applied at all three parse sites (engine/synthesize/router). Live: 2/8 → 8/8.
+- **PR gate consistency** — blocking now = `critical` OR (`high` AND conf≥8), matching
+  what the daily-rigor comment actually shows (no invisible CI fails).
+- **`review` input hardening** — directory walk skips dotfiles/binary/unreadable files
+  and enforces the byte budget during collection; `review --diff` surfaces git failures.
+
+**Deliberately deferred / declined (with reasons):**
+
+- **Retry 429/5xx differentiation + `Retry-After`** — declined for now: the flakiness
+  was a parse bug, not HTTP (no 429s observed). Revisit only if real rate-limiting shows up.
+- **CI install pinned to a SHA/tag** (vs `@main` in `venice-review.yml`) — deferred:
+  needs a release tag and council on `main` first.
+- **Action ignores `~/.config/council` override on runners** — deferred (YAGNI: no
+  self-hosted runner; GitHub-hosted runners have no such file).
+- **Authorization-header / exception redaction** — verified NOT a current leak (the key
+  lives in headers, never in the exception strings we build); skipped to avoid dead code.
 
 Note: `setup/templates/venice-review.yml` is a **template**, not active CI in this
 repo, so the PR is not auto-reviewed — the self-review was run manually on the VPS.
