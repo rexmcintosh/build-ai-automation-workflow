@@ -2,6 +2,10 @@
 
 Home of the VPS + Venice AI multi-agent PR review setup, plus the automation workflow built on top of it.
 
+> **New here? Start with [`docs/OVERVIEW.md`](docs/OVERVIEW.md)** — a plain-English,
+> non-technical explanation of what this project is and the thinking behind it
+> (the @levelsio × Naval inspiration, the AI-builds → AI-panel-reviews → human-approves model).
+
 The dev infrastructure model: **Claude Code runs on a Hetzner VPS → opens PRs → a Venice AI council critiques every PR → you merge → CI deploys to the same VPS.** See `setup/PLAYBOOK.md` for the full architecture, provisioning steps, and day-to-day loop.
 
 ## Two phases
