@@ -335,13 +335,15 @@ You now have **two** ways to reach the VPS:
 Both are fine and the design intentionally keeps public 22/80/443 open. Prefer
 the Tailscale name day-to-day.
 
-> **Optional hardening (later, not now):** once you trust the mesh, you can lock
-> SSH so it's reachable *only* over Tailscale — restrict `sshd` to the Tailscale
-> interface and drop public port 22 in UFW. That removes your last public SSH
-> surface. **Don't do this until Tailscale is rock-solid**, or you can lock
-> yourself out of a remote box. It's a deliberate, separate step — flagged here
-> so you know it exists; revisit it after [DAILY-LOOP.md](DAILY-LOOP.md) is your
-> routine.
+> **Optional hardening — ✅ DONE 2026-06-05.** Once you trust the mesh, you lock
+> the VPS so it's reachable *only* over Tailscale: drop public 22/80/443 (+ the
+> Mosh range) in UFW and allow everything on the `tailscale0` interface instead.
+> That removes the box's entire public inbound surface (the public IP stays as the
+> outbound pipe). This was done on the live VPS — the full runbook, rollback, the
+> idempotent re-apply script (`../setup/harden-mesh-only.sh`), and the
+> `tailscale serve` recipe for future private web services all live in
+> **[MESH-ONLY-LOCKDOWN.md](MESH-ONLY-LOCKDOWN.md)**. End state: only `tailscale0`
+> + `udp/41641` are allowed inbound. Reach the box with `ssh dev@vps` as always.
 
 ---
 
