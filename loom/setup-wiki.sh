@@ -19,8 +19,15 @@ cat > "$HOOK" <<EOF
 set -euo pipefail
 staged=\$(git diff --cached --name-only)
 [ -z "\$staged" ] && exit 0
-# detect-secrets-hook returns nonzero if any secret is found
-if echo "\$staged" | xargs "${DETECT_SECRETS_HOOK}" --baseline /dev/null 2>/dev/null; then
+# detect-secrets-hook returns nonzero if any secret is found.
+# Base64HighEntropyString and HexHighEntropyString are disabled to prevent
+# false positives on benign IDs (Gmail thread IDs, Drive doc IDs, hashes).
+# The LLM distill sanitize pass is the entropy backstop. Credential-specific
+# and keyword detectors remain active to catch real secrets.
+if echo "\$staged" | xargs "${DETECT_SECRETS_HOOK}" \
+  --disable-plugin Base64HighEntropyString \
+  --disable-plugin HexHighEntropyString \
+  2>/dev/null; then
   exit 0  # no secrets found
 else
   echo "pre-commit: secret detected in staged files — aborting commit" >&2
