@@ -36,6 +36,16 @@ def test_gate_hit_quarantines_and_skips(tmp_path, monkeypatch):
     assert summary["quarantined"] == 1 and summary["distilled"] == 0
     assert LoomState(cfg.state_path).state_of("sess1") == "pending"
 
+def test_shadow_run_is_idempotent(tmp_path, monkeypatch):
+    cfg = _setup(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    monkeypatch.setattr(run_mod.llm, "run", lambda prompt, model, **k: "- type: fact\n  learning: x")
+    first = run_mod.absorb(cfg, shadow=True)
+    second = run_mod.absorb(cfg, shadow=True)
+    assert first["distilled"] == 1
+    assert second["distilled"] == 0          # already distilled → skipped, not re-distilled
+
+
 def test_stage2_gate_hit_leaves_no_unscanned_artifact(tmp_path, monkeypatch):
     cfg = _setup(tmp_path)
     # transcript (in projects/) passes; learnings artifact (in loom/) fails

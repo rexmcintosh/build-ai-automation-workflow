@@ -17,6 +17,8 @@ from .transcript import extract_text
 
 _PROMPTS = Path(__file__).parent / "prompts"
 
+_STAGE_ORDER = {"pending": 0, "distilled": 1, "weaved": 2, "committed": 3}
+
 
 @dataclass
 class Config:
@@ -38,6 +40,12 @@ def absorb(cfg: Config, shadow: bool = True) -> Dict[str, int]:
 
     for transcript in find_pending(cfg.projects_dir, state):
         sid = session_id_for(transcript)
+
+        # v0 shadow-mode idempotency: skip sessions already at or past 'distilled'.
+        # find_pending only excludes 'committed'; distilled/weaved sessions re-appear
+        # in v1 so the weave can resume, but in shadow mode there is nothing more to do.
+        if shadow and _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
+            continue  # v0 target reached; nothing more to do in shadow mode
 
         # Stage 0 gate — never feed a flagged transcript to an LLM
         if not scan_clean(transcript):

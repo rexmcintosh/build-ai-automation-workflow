@@ -14,17 +14,16 @@ def test_advance_and_persist(tmp_path):
     assert LoomState(p).state_of("abc") == "distilled"  # reloaded from disk
 
 
-def test_is_complete_at_distilled_or_later(tmp_path):
-    """v0 shadow mode ends at 'distilled'; v1 ends at 'committed'.
-    Sessions at distilled/weaved/committed must all be skipped on reruns."""
+def test_is_complete_only_when_committed(tmp_path):
+    """Only 'committed' is fully complete; distilled/weaved must still be resumed by v1."""
     s = LoomState(tmp_path / "state.json")
     assert s.is_complete("abc") is False  # pending → not complete
     s.advance("abc", "distilled")
-    assert s.is_complete("abc") is True   # distilled → complete (v0 terminal)
+    assert s.is_complete("abc") is False  # distilled → NOT complete; v1 must resume
     s.advance("abc", "weaved")
-    assert s.is_complete("abc") is True   # weaved → still complete
+    assert s.is_complete("abc") is False  # weaved → NOT complete; v1 must still commit
     s.advance("abc", "committed")
-    assert s.is_complete("abc") is True   # committed → complete
+    assert s.is_complete("abc") is True   # committed → fully done
 
 
 def test_unknown_state_raises(tmp_path):
