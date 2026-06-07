@@ -1,0 +1,7 @@
+state.json
+spool/
+quarantine/
+learnings/
+logs/
+*.lock
+*.err
