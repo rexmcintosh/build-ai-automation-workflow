@@ -1,5 +1,8 @@
 """Thin wrapper around headless `claude -p`. Authenticates via the Max session
-(no API key). Default has NO tools; pass allowed_tools for steps that need MCP/file writes."""
+(no API key). Default has NO tools; pass allowed_tools for steps that need MCP/file writes.
+
+Prompts are fed via stdin (``-p -``) to avoid exceeding ARG_MAX on large transcripts.
+The ``build_argv`` helper exposes the argv for testing; ``run`` always uses stdin."""
 from __future__ import annotations
 
 import shutil
@@ -15,9 +18,10 @@ def _claude_bin() -> str:
     return shutil.which("claude") or "/usr/bin/claude"
 
 
-def build_argv(prompt: str, model: str, allowed_tools: Optional[Sequence[str]] = None,
+def build_argv(model: str, allowed_tools: Optional[Sequence[str]] = None,
                skip_permissions: bool = False) -> List[str]:
-    argv = [_claude_bin(), "-p", prompt, "--model", model, "--output-format", "text"]
+    """Return the argv for a ``claude -p -`` call (prompt fed via stdin)."""
+    argv = [_claude_bin(), "-p", "-", "--model", model, "--output-format", "text"]
     if allowed_tools:
         argv += ["--allowedTools", *allowed_tools]
     if skip_permissions:
@@ -27,8 +31,10 @@ def build_argv(prompt: str, model: str, allowed_tools: Optional[Sequence[str]] =
 
 def run(prompt: str, model: str, allowed_tools: Optional[Sequence[str]] = None,
         skip_permissions: bool = False, timeout: int = 600) -> str:
+    """Run claude with *prompt* supplied via stdin to stay within ARG_MAX."""
     proc = subprocess.run(
-        build_argv(prompt, model, allowed_tools, skip_permissions),
+        build_argv(model, allowed_tools, skip_permissions),
+        input=prompt,
         capture_output=True, text=True, timeout=timeout,
     )
     if proc.returncode != 0:

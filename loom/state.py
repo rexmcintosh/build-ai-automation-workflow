@@ -20,7 +20,12 @@ class LoomState:
         return self._data.get(session_id, {}).get("state", "pending")
 
     def is_complete(self, session_id: str) -> bool:
-        return self.state_of(session_id) == "committed"
+        """True when no further work is needed in the current mode.
+
+        v0 shadow mode ends at 'distilled'; v1 will end at 'committed'.
+        Treat every state at or past 'distilled' as complete so that reruns
+        skip already-processed sessions (idempotency requirement)."""
+        return self.state_of(session_id) in ("distilled", "weaved", "committed")
 
     def advance(self, session_id: str, state: str) -> None:
         if state not in STATES:
