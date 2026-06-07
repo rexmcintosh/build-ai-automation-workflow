@@ -2,6 +2,7 @@
 artifact → mark 'distilled'. Live weave (Opus → wiki/.claude) is added in v1."""
 from __future__ import annotations
 
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,18 +53,21 @@ def absorb(cfg: Config, shadow: bool = True) -> Dict[str, int]:
             text = extract_text(transcript)
             learnings = llm.run(_distill_prompt(text), model="sonnet")
         except Exception:
+            logging.exception("distill failed for %s", transcript)
             summary["failed"] += 1
             continue  # stays pending; spooled copy preserves it
 
         # Stage 2.0 gate — scan the learnings artifact before persisting
         learnings_dir.mkdir(parents=True, exist_ok=True)
         artifact = learnings_dir / f"{sid}.md"
-        artifact.write_text(learnings + "\n")
-        if not scan_clean(artifact):
+        tmp_artifact = learnings_dir / f"{sid}.tmp"
+        tmp_artifact.write_text(learnings + "\n")
+        if not scan_clean(tmp_artifact):
             quarantine_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(artifact), str(quarantine_dir / f"{sid}.md"))
+            shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
             summary["quarantined"] += 1
-            continue  # stays pending
+            continue  # stays pending; no unscanned artifact left in learnings/
+        tmp_artifact.rename(artifact)  # atomic on POSIX, only after the gate passes
 
         state.advance(sid, "distilled")
         summary["distilled"] += 1

@@ -35,3 +35,15 @@ def test_gate_hit_quarantines_and_skips(tmp_path, monkeypatch):
     assert called["llm"] is False                                          # never fed an LLM
     assert summary["quarantined"] == 1 and summary["distilled"] == 0
     assert LoomState(cfg.state_path).state_of("sess1") == "pending"
+
+def test_stage2_gate_hit_leaves_no_unscanned_artifact(tmp_path, monkeypatch):
+    cfg = _setup(tmp_path)
+    # transcript (in projects/) passes; learnings artifact (in loom/) fails
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: "projects" in str(p))
+    monkeypatch.setattr(run_mod.llm, "run", lambda prompt, model, **k: "- type: fact\n  learning: x")
+    summary = run_mod.absorb(cfg, shadow=True)
+    assert summary["quarantined"] == 1 and summary["distilled"] == 0
+    assert not (cfg.loom_dir / "learnings" / "sess1.md").exists()      # nothing unscanned left
+    assert not (cfg.loom_dir / "learnings" / "sess1.tmp").exists()     # temp cleaned up
+    assert (cfg.loom_dir / "quarantine" / "sess1.md").exists()         # preserved for forensics
+    assert LoomState(cfg.state_path).state_of("sess1") == "pending"
