@@ -24,7 +24,7 @@ staged=\$(git diff --cached --name-only)
 # false positives on benign IDs (Gmail thread IDs, Drive doc IDs, hashes).
 # The LLM distill sanitize pass is the entropy backstop. Credential-specific
 # and keyword detectors remain active to catch real secrets.
-if echo "\$staged" | xargs "${DETECT_SECRETS_HOOK}" \
+if printf '%s\n' "\$staged" | xargs -d '\n' "${DETECT_SECRETS_HOOK}" \
   --disable-plugin Base64HighEntropyString \
   --disable-plugin HexHighEntropyString \
   2>/dev/null; then
@@ -38,5 +38,11 @@ chmod +x "$HOOK"
 [ -f .gitignore ] || printf '_absorb_log.json\n.obsidian/\n' > .gitignore
 git add -A && git commit -q -m "loom: initial wiki snapshot" || true
 git branch -f loom-shadow
+# v1: a dedicated worktree on loom-shadow so ~/wiki stays on master during runs.
+WORKTREE="/home/dev/wiki-loom-shadow"
+if [ ! -d "$WORKTREE" ]; then
+  git worktree add -q "$WORKTREE" loom-shadow
+fi
+echo "loom-shadow worktree: $WORKTREE"
 echo "wiki repo ready; shadow branch 'loom-shadow' created; NO remote configured"
 git remote -v  # must be empty
