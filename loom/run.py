@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -58,16 +59,23 @@ def _index_listing(wiki: Path) -> str:
 
 
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
-           max_targets: int = 10, today: str = "") -> Dict[str, int]:
+           max_targets: int = 10, today: str = "", deadline_seconds=None) -> Dict[str, int]:
     state = LoomState(cfg.state_path)
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
     quarantine_dir = cfg.loom_dir / "quarantine"
     summary = {"distilled": 0, "quarantined": 0, "failed": 0,
-               "committed": 0, "deferred": 0, "rejected": 0}
+               "committed": 0, "deferred": 0, "rejected": 0, "deadline_hit": False}
+
+    start = time.monotonic()
+    def _expired() -> bool:
+        return deadline_seconds is not None and (time.monotonic() - start) > deadline_seconds
 
     # ---------- Stage 1: distill (v0) ----------
     for transcript in find_pending(cfg.projects_dir, state):
+        if _expired():
+            summary["deadline_hit"] = True
+            break
         sid = session_id_for(transcript)
         if _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
             continue
@@ -104,11 +112,11 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
         return summary
 
     # ---------- Stage 2: weave (v1) ----------
-    _weave_all(cfg, state, backend, max_targets, today, summary)
+    _weave_all(cfg, state, backend, max_targets, today, summary, _expired)
     return summary
 
 
-def _weave_all(cfg, state, backend_name, max_targets, today, summary):
+def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired):
     repo = ShadowRepo(cfg.wiki_worktree, base="master")
     ledger = WeaveLedger(cfg.ledger_path)
     ledger.reconcile_from_git(repo.committed_ids())          # git is authoritative
@@ -153,6 +161,12 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary):
 
     targets = list(buckets.keys())
     for target in targets[:max_targets]:
+        if expired():
+            summary["deadline_hit"] = True
+            for entry in buckets[target]:
+                ledger.defer(entry["id"], "run deadline")
+                summary["deferred"] += 1
+            continue
         res = weave_target(be, repo, ledger, target, dirs[target], buckets[target], today=today)
         summary["committed"] += len(res["committed"])
         summary["rejected"] += len(res["rejected"])

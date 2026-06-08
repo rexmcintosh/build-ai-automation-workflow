@@ -123,3 +123,21 @@ def test_per_run_cap_defers_excess(tmp_path, monkeypatch):
     summary = run_mod.absorb(cfg, shadow=False, backend="claude", max_targets=2)
     assert summary["committed"] == 2 and summary["deferred"] >= 1
     assert LoomState(cfg.state_path).state_of("sess1") == "distilled"  # not all settled
+
+
+def test_run_deadline_stops_processing(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    # fake clock: first reading (start) = 0; every later reading = 1000 -> deadline 5 is exceeded
+    calls = {"n": 0}
+    def clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 1000.0
+    monkeypatch.setattr(run_mod.time, "monotonic", clock)
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            return "- type: fact\n  subject: x\n  learning: y\n  route: wiki/people/x"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", deadline_seconds=5)
+    assert summary["deadline_hit"] is True
+    assert summary["distilled"] == 0          # distill loop broke before processing
