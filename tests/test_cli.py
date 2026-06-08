@@ -125,3 +125,47 @@ def test_review_explicit_missing_path_exits_2(capsys, member_json, tmp_path):
     rc = cli.main(["review", str(empty)], _settings=settings, _panels=panels, _client=client)
     assert rc == 2
     assert "nothing readable to review" in capsys.readouterr().err
+
+
+def _env_with_spec(member_json):
+    from council.config import Settings
+    settings = Settings(default_panel="decision", router_model="r", chair_model="c")
+    panels = {
+        "code-review": Panel("code-review", "review code", [Member("Eng", "code1", "eng")]),
+        "spec-review": Panel("spec-review", "review docs", [Member("Editor", "doc1", "editor")]),
+    }
+    client = FakeClient(by_model={
+        "code1": member_json(stance="approve", headline="ok"),
+        "doc1": member_json(stance="approve", headline="ok"),
+        "c": {"recommendation": "x", "confidence": 8, "consensus": [],
+              "disagreements": [], "cross_panel_themes": []}})
+    return settings, panels, client
+
+
+def test_review_doc_file_autopicks_spec_review(tmp_path, member_json):
+    settings, panels, client = _env_with_spec(member_json)
+    f = tmp_path / "design.md"
+    f.write_text("# Design\nsome spec prose\n")
+    cli.main(["review", str(f)], _settings=settings, _panels=panels, _client=client)
+    models = {c["model"] for c in client.calls}
+    assert "doc1" in models       # spec-review seat was consulted
+    assert "code1" not in models  # code-review seat was not
+
+
+def test_review_code_file_autopicks_code_review(tmp_path, member_json):
+    settings, panels, client = _env_with_spec(member_json)
+    f = tmp_path / "app.py"
+    f.write_text("print('hi')\n")
+    cli.main(["review", str(f)], _settings=settings, _panels=panels, _client=client)
+    models = {c["model"] for c in client.calls}
+    assert "code1" in models and "doc1" not in models
+
+
+def test_review_explicit_panel_overrides_autopick(tmp_path, member_json):
+    settings, panels, client = _env_with_spec(member_json)
+    f = tmp_path / "design.md"
+    f.write_text("# Design\n")
+    cli.main(["review", str(f), "--panel", "code-review"],
+             _settings=settings, _panels=panels, _client=client)
+    models = {c["model"] for c in client.calls}
+    assert "code1" in models and "doc1" not in models
