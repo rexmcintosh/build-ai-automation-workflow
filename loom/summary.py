@@ -11,7 +11,7 @@ STALE_DAYS = 7
 
 _SECRET_RE = re.compile(
     r"AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]+|"
-    r"-----BEGIN [A-Z ]+PRIVATE KEY-----|ntn_[A-Za-z0-9]+|[0-9]{8,10}:AA[A-Za-z0-9_-]{33}"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|ntn_[A-Za-z0-9]+|[0-9]{8,10}:AA[A-Za-z0-9_-]{33}"
 )
 
 

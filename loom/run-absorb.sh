@@ -33,7 +33,8 @@ PY
 )"
 [ -z "$MSG" ] && MSG="⚠️ Loom absorb (rc=$RC). Check loom/logs/."
 
-claude -p "Send a Telegram message to chat_id $CHAT_ID with text: '$MSG' Output only SENT or FAILED." \
+PROMPT="Send a Telegram message to chat_id ${CHAT_ID} with text: ${MSG} Output only SENT or FAILED."
+claude -p "$PROMPT" \
   --model haiku --allowedTools mcp__plugin_telegram_telegram__reply \
   --dangerously-skip-permissions --output-format text >/dev/null 2>&1 || true
 

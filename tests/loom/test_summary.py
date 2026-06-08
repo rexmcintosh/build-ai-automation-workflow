@@ -25,3 +25,17 @@ def test_staleness_threshold_flags_old_shadow():
     s = build_summary(counts={"committed": 0}, shadow_commits=4, oldest_age_days=10,
                       rejected=[], proposed=[])
     assert "STALE" in s
+
+
+def test_build_summary_scrubs_secrets_in_items():
+    fake_pat = "ghp_" + "a" * 36
+    pem = "-----BEGIN PRIVATE KEY-----"
+    s = build_summary(
+        counts={"committed": 1},
+        shadow_commits=1, oldest_age_days=0,
+        rejected=[("s1#0", f"leaked {fake_pat}")],
+        proposed=[f"note {pem} MIIB..."],
+    )
+    assert fake_pat not in s and "ghp_" not in s
+    assert "-----BEGIN PRIVATE KEY-----" not in s
+    assert "<redacted>" in s
