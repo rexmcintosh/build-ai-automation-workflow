@@ -71,3 +71,33 @@ def test_rollback_restores_preexisting_file(env):
     ts = sorted(p.name for p in env["backups"].iterdir())[-1]
     rollback(backups_dir=env["backups"], ts=ts)
     assert tgt.read_text() == "ORIGINAL\n"                  # restored from backup
+
+
+def test_promote_update_of_loom_managed_file_succeeds(env):
+    # first promote creates the .claude file and records its promoted_sha
+    promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
+    tgt = env["claude"] / "memory" / "feedback-x.md"
+    assert tgt.read_text() == "a new preference\n"
+    # re-stage an UPDATED version on loom-shadow
+    _git(env["wiki"], "checkout", "-q", "loom-shadow")
+    staged = env["wiki"] / "_staged" / ".claude" / "memory" / "feedback-x.md"
+    staged.parent.mkdir(parents=True, exist_ok=True); staged.write_text("an updated preference\n")
+    _git(env["wiki"], "add", "-A"); _git(env["wiki"], "commit", "-qm", "restage update")
+    _git(env["wiki"], "checkout", "-q", "master")
+    # second promote with the guard ON must SUCCEED (on-disk still matches last promoted)
+    promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
+    assert tgt.read_text() == "an updated preference\n"
+
+
+def test_promote_refuses_out_of_band_edit(env):
+    promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
+    tgt = env["claude"] / "memory" / "feedback-x.md"
+    tgt.write_text("USER EDITED THIS\n")                 # out-of-band change after promote
+    _git(env["wiki"], "checkout", "-q", "loom-shadow")
+    staged = env["wiki"] / "_staged" / ".claude" / "memory" / "feedback-x.md"
+    staged.parent.mkdir(parents=True, exist_ok=True); staged.write_text("loom update\n")
+    _git(env["wiki"], "add", "-A"); _git(env["wiki"], "commit", "-qm", "restage")
+    _git(env["wiki"], "checkout", "-q", "master")
+    with pytest.raises(PromoteError):
+        promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
+    assert tgt.read_text() == "USER EDITED THIS\n"        # untouched

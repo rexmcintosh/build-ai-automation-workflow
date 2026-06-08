@@ -5,6 +5,7 @@ the manifest. ~/.claude is not git-tracked, so the backup is the only undo for i
 The runner wraps the whole call in flock (shares the absorb lock)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -24,6 +25,28 @@ def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     if check and proc.returncode != 0:
         raise PromoteError(f"git {' '.join(args)}: {proc.stderr.strip()}")
     return proc
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _last_promoted_sha(backups_dir: Path, target: str):
+    """The promoted_sha loom last recorded for *target*, scanning manifests newest-first."""
+    if not backups_dir.exists():
+        return None
+    for stamp in sorted((p for p in backups_dir.iterdir() if p.is_dir()), reverse=True):
+        mpath = stamp / "manifest.json"
+        if not mpath.exists():
+            continue
+        try:
+            entries = json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for e in entries:
+            if e.get("target") == target and e.get("promoted_sha"):
+                return e["promoted_sha"]
+    return None
 
 
 def _shadow_has_stage(wiki_root: Path) -> List[str]:
@@ -53,19 +76,22 @@ def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
         real_rel = rel[len(_STAGE) + 1:]                 # strip "_staged/.claude/"
         target = claude_root / real_rel
         if expect_unmodified and target.exists():
-            raise PromoteError(f"refusing: {target} exists/modified out of band")
+            expected = _last_promoted_sha(backups_dir, str(target))
+            actual = _sha(target.read_text(encoding="utf-8"))
+            if expected is None or actual != expected:
+                raise PromoteError(f"refusing: {target} modified out of band or not loom-managed")
         plan.append((target, content, target.exists()))
 
     # 2. BACKUP + manifest
     stamp_dir = backups_dir / ts
     stamp_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for i, (target, _content, existed) in enumerate(plan):
+    for i, (target, content, existed) in enumerate(plan):
         backup = stamp_dir / f"{i:04d}.bak"
         if existed:
             shutil.copy2(target, backup)
         manifest.append({"target": str(target), "backup": str(backup) if existed else None,
-                         "existed": existed})
+                         "existed": existed, "promoted_sha": _sha(content)})
     (stamp_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     # 3. ATOMIC-SWAP each staged file in
