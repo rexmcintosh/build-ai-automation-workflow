@@ -122,7 +122,38 @@ def test_per_run_cap_defers_excess(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
     summary = run_mod.absorb(cfg, shadow=False, backend="claude", max_targets=2)
     assert summary["committed"] == 2 and summary["deferred"] >= 1
-    assert LoomState(cfg.state_path).state_of("sess1") == "distilled"  # not all settled
+
+
+def test_max_per_target_defers_overflow(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    def fake_complete(role, system, user, json_mode=False):
+        if role == "route":
+            return '{"target":"people/alpha.md","action":"create","cross_links":[]}'
+        if role == "weave":
+            return "# Alpha\n\nbody.\n"
+        # distill: 5 learnings, all same subject -> all route to the SAME target
+        return "\n".join(f"- type: fact\n  subject: alpha\n  learning: fact {i}\n  route: wiki/people/alpha"
+                         for i in range(5))
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            return fake_complete(role, system, user, json_mode)
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", max_targets=10, max_per_target=2)
+    assert summary["committed"] == 2 and summary["deferred"] == 3   # 2 woven, 3 overflow deferred
+    assert LoomState(cfg.state_path).state_of("sess1") == "distilled"  # not all settled -> retried
+
+
+def test_distill_false_skips_distill(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)                 # has a pending sess1.jsonl
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            raise AssertionError("distill must not run when distill=False")
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="venice", distill=False)
+    assert summary["distilled"] == 0
+    assert LoomState(cfg.state_path).state_of("sess1") == "pending"   # never distilled
 
 
 def test_run_deadline_stops_processing(tmp_path, monkeypatch):

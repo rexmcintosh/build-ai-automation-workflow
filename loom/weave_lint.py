@@ -16,7 +16,10 @@ def is_trailing_append(before: str, after: str) -> bool:
     return len(after) > len(before)     # old kept verbatim + new tacked on the end
 
 
-DEFAULT_MAX_CHURN = 0.5  # >50% of the original lines discarded = a rewrite, not an integration
+DEFAULT_MAX_CHURN = 0.7  # >70% of the original lines discarded = a rewrite, not an integration
+# (relaxed from 0.5: legitimate multi-fact integration into an existing article reorganizes a
+#  fair amount; the per-target-per-run cap bounds churn, so the lint only needs to catch a
+#  genuine wholesale rewrite.)
 
 
 def is_excessive_rewrite(before: str, after: str, max_churn: float = DEFAULT_MAX_CHURN) -> bool:
