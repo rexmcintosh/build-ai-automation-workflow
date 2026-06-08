@@ -11,21 +11,23 @@ def test_default_config_has_v1_paths():
     assert str(cfg.ledger_path).endswith("loom/weave_ledger.json")
     assert str(cfg.claude_dir).endswith(".claude")
 
-def test_backfill_uses_venice_and_cap(monkeypatch):
+def test_backfill_uses_venice_skips_distill_and_caps(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "absorb",
-                        lambda cfg, shadow, backend, max_targets, today="", deadline_seconds=None: seen.update(
-                            backend=backend, shadow=shadow, max_targets=max_targets) or {"committed": 0})
-    rc = cli.main(["backfill", "--max-targets", "3"])
-    assert rc == 0 and seen == {"backend": "venice", "shadow": False, "max_targets": 3}
+                        lambda cfg, **k: seen.update(k) or {"committed": 0})
+    rc = cli.main(["backfill", "--max-targets", "3", "--max-per-target", "2"])
+    assert rc == 0
+    assert seen["backend"] == "venice" and seen["shadow"] is False
+    assert seen["max_targets"] == 3 and seen["max_per_target"] == 2
+    assert seen["distill"] is False          # backfill never distills
 
-def test_absorb_live_flag_uses_claude(monkeypatch):
+def test_absorb_live_flag_uses_claude_and_distills(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "absorb",
-                        lambda cfg, shadow, backend, max_targets, today="", deadline_seconds=None: seen.update(
-                            backend=backend, shadow=shadow) or {"committed": 0})
+                        lambda cfg, **k: seen.update(k) or {"committed": 0})
     cli.main(["absorb", "--live"])
-    assert seen == {"backend": "claude", "shadow": False}
+    assert seen["backend"] == "claude" and seen["shadow"] is False
+    assert seen.get("distill", True) is True   # absorb distills (default)
 
 def test_promote_and_rollback_dispatch(monkeypatch):
     calls = {}
