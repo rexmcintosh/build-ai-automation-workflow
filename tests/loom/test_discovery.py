@@ -16,3 +16,12 @@ def test_find_pending_excludes_committed(tmp_path):
     state.advance("a", "committed")
     pending = find_pending(projects, state)
     assert [p.name for p in pending] == ["b.jsonl"]
+
+def test_find_pending_excludes_quarantined(tmp_path):
+    projects = tmp_path / "projects"
+    _touch(projects / "p1" / "a.jsonl")
+    _touch(projects / "p2" / "b.jsonl")
+    state = LoomState(tmp_path / "state.json")
+    state.advance("a", "quarantined")
+    pending = find_pending(projects, state)
+    assert [p.name for p in pending] == ["b.jsonl"]

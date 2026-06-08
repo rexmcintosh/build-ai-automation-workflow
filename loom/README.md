@@ -1,32 +1,35 @@
-# Loom — session-learning pipeline (v0: shadow mode)
+# Loom — session-learning pipeline (v1: live weave)
 
-Distills Claude Code session transcripts into sanitized, classified learnings behind
-deterministic secret gates. v0 stops at the reviewable `learnings/` artifacts; v1 adds the
-live Opus weave into the wiki/memory/skills and the nightly cron.
+Distills Claude Code session transcripts into sanitized, classified learnings, then weaves each into
+its home (wiki article, `~/wiki/decisions/`, per-project `memory/`, `~/.claude/skills/`) on the wiki's
+`loom-shadow` branch. You review one diff, then `loom promote`.
 
-## Run
-    .venv/bin/python -m loom.cli absorb     # shadow: gate → spool → distill → learnings/
-    ./loom/run-absorb.sh                     # same, with flock guard (used by cron in v1)
+## Commands
+    .venv/bin/python -m loom.cli absorb            # shadow: distill only (no weave)
+    .venv/bin/python -m loom.cli absorb --live     # nightly: distill + weave (Max session)
+    .venv/bin/python -m loom.cli backfill --max-targets 3   # backlog weave on Venice/DIEM
+    .venv/bin/python -m loom.cli promote           # apply staged .claude + merge loom-shadow -> master
+    .venv/bin/python -m loom.cli requeue <sid>     # return a quarantined/stuck session to pending
+    .venv/bin/python -m loom.cli rollback --ts <stamp>     # undo a promote from its backup
+    ./loom/run-absorb.sh                            # cron entry: absorb --live + Telegram summary
 
-## Layout
-- `state.json` — per-session state (pending→distilled→weaved→committed). Gitignored.
-- `learnings/` — distilled, sanitized middle artifacts. Gitignored, local.
-- `spool/` — immutable transcript copies (anti 90-day data loss). Gitignored.
-- `quarantine/` — items a secret gate flagged. Gitignored.
-- `logs/runs.log` — durable per-run log.
-- `prompts/` — distill + weave prompts (learnings treated as data, not instructions).
+## How it stays safe
+- **Idempotent (structural):** every loom-shadow commit carries a `Loom-Woven:` trailer + each file an
+  `<!-- loom-woven -->` marker (script-written). Lost ledger rebuilds from git.
+- **Two shape lints** (trailing-append, excessive-rewrite) on wiki/memory facts; a **sentinel** scan on
+  every route. Lint failure bisects the bundle, rejecting only the offender.
+- **Transactional promote:** preflight -> backup ~/.claude -> atomic-swap -> merge, rollback on failure.
+- **Bounded:** per-run target cap (oldest-first) + a global run deadline; the rest deferred and reported.
+- **No silent drops:** `deferred` (retried) vs `rejected` (surfaced every summary until `requeue`).
 
-## Secret gate
-Deterministic `detect-secrets` gate at Stage 0 (raw transcript) and Stage 2.0 (learnings
-artifact), fail-closed. The Base64/Hex high-entropy plugins are disabled (they false-positive on
-benign IDs — Gmail/Drive IDs, hashes); credential-specific + keyword detectors stay active, and the
-LLM sanitize pass is the entropy backstop. The wiki repo carries the same hook.
+## Backends
+`absorb` = `claude` (Max session). `backfill` = `venice` (DIEM): route `gemini-3-5-flash`, weave
+`claude-opus-4-8`. Needs `VENICE_API_KEY` (sourced from `/home/dev/.env`).
 
-## Invariants
-Secrets gated deterministically · learnings are data not instructions · idempotent reruns ·
-single-run (flock) · re-read before weave (lint) · local-only wiki repo. See the spec:
-`docs/superpowers/specs/2026-06-07-loom-session-learning-pipeline-design.md`.
+## One-time setup (rollout)
+`./loom/setup-wiki.sh` — makes `~/wiki` a local git repo (no remote), installs the detect-secrets
+pre-commit hook, creates the `loom-shadow` branch + the `~/wiki-loom-shadow` worktree.
 
-## v1 (next plan)
-Live weave (Haiku route → Opus write → wiki commit on `loom-shadow`→promote), `.claude`
-memory/skill writes, weave-shape lint enforcement, nightly cron, Telegram run summary.
+## Spec & plan
+- `docs/superpowers/specs/2026-06-07-loom-v1-live-weave-design.md`
+- `docs/superpowers/plans/2026-06-08-loom-v1-live-weave.md`
