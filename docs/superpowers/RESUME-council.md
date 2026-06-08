@@ -117,3 +117,16 @@ non-Claude model for the Adversary). Leave **no `REPLACE-` placeholders**.
 A one-off backup left 11 personal repos on `wip/mini-snapshot-2026-06-03`
 branches on GitHub (uncommitted Mini work, parked safely). Ignore them for the
 council build; they're just sitting there if you ever want to integrate that WIP.
+
+## Piece 2 — SHIPPED (2026-06-08, council v0.2.0)
+
+Review beyond code: `spec-review` panel (Editor/Domain Skeptic/Implementer/Pre-mortem),
+`routing.py` (classify_path/split_diff_by_type, hardened for spaces + git-quoted paths),
+`render_combined`, and `review.run_pr_review` (code gated + docs advisory in one comment).
+`venice_review.py` is now a thin shim over the package, so future upgrades reach all repos
+via a tag re-pin. Tagged `council-v0.2.0`; all 17 repos re-pinned. Verified live: a mixed
+PR posts one comment with a gated **Code** section + an advisory **Docs** section.
+
+Known design choice (flagged by the panel's own self-review): a code file under a doc
+directory (e.g. `docs/build.py`) classifies as "doc" → advisory, not the code gate.
+Intended per the routing rule, but revisit if real code lives under docs/.
