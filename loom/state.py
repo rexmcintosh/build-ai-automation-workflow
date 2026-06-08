@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Dict
 
-STATES = ("pending", "distilled", "weaved", "committed")
+STATES = ("pending", "distilled", "weaved", "committed", "quarantined")
 
 
 class LoomState:

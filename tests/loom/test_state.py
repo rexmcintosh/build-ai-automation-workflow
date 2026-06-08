@@ -30,4 +30,20 @@ def test_unknown_state_raises(tmp_path):
     s = LoomState(tmp_path / "state.json")
     with pytest.raises(ValueError):
         s.advance("abc", "bogus")
-    assert set(STATES) == {"pending", "distilled", "weaved", "committed"}
+    assert set(STATES) == {"pending", "distilled", "weaved", "committed", "quarantined"}
+
+
+def test_quarantined_is_a_valid_state(tmp_path):
+    s = LoomState(tmp_path / "state.json")
+    s.advance("q1", "quarantined")
+    assert LoomState(tmp_path / "state.json").state_of("q1") == "quarantined"
+
+
+def test_quarantined_is_not_complete(tmp_path):
+    s = LoomState(tmp_path / "state.json")
+    s.advance("q1", "quarantined")
+    assert s.is_complete("q1") is False
+
+
+def test_states_set_includes_quarantined():
+    assert set(STATES) == {"pending", "distilled", "weaved", "committed", "quarantined"}
