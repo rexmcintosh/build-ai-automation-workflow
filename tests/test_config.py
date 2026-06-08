@@ -44,3 +44,13 @@ def test_truncate_keeps_head_and_tail():
     out = truncate("x" * 100, cap=20)
     assert "truncated" in out
     assert len(out.encode()) < 100
+
+
+def test_real_panels_include_spec_review():
+    # loads the SHIPPED council/panels.toml (no path arg)
+    settings, panels = load_panels()
+    assert "spec-review" in panels
+    p = panels["spec-review"]
+    assert [m.name for m in p.members] == [
+        "Editor", "Domain Skeptic", "Implementer", "Pre-mortem Adversary"]
+    assert all(m.model and m.system for m in p.members)  # no empty models/personas

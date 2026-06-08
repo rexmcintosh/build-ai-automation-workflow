@@ -102,7 +102,7 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
     r = sub.add_parser("review", help="review a file / dir / diff")
     r.add_argument("path", nargs="?")
     r.add_argument("--diff", action="store_true")
-    r.add_argument("--panel", default="code-review")
+    r.add_argument("--panel", default=None)
     r.add_argument("--rigor", choices=["daily", "deep"]); r.add_argument("--format", default="term")
     r.add_argument("--panels")
 
@@ -158,6 +158,16 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
             print("Nothing to review (empty diff / no input).", file=sys.stderr)
             return 0
         ctx = truncate(f"Review this:\n\n{text}", settings.byte_cap)
-        return _run(ctx, args.panel, settings, panels, client, args.rigor, args.format)
+        panel_name = args.panel
+        if panel_name is None:
+            # auto-pick by target: a single doc file -> spec-review; otherwise code-review.
+            # (dirs / --diff / stdin span many files; the CI front-end splits those.)
+            from .routing import classify_path
+            if not args.diff and args.path not in (None, "-") and Path(args.path).is_file() \
+                    and classify_path(args.path) == "doc":
+                panel_name = "spec-review"
+            else:
+                panel_name = "code-review"
+        return _run(ctx, panel_name, settings, panels, client, args.rigor, args.format)
 
     return 1
