@@ -56,3 +56,49 @@ def test_split_doc_only():
 def test_split_empty_or_garbage():
     assert split_diff_by_type("") == ("", "")
     assert split_diff_by_type("not a diff at all") == ("", "")
+
+
+SPACE_DOC = (
+    'diff --git a/my docs/Design Notes.md b/my docs/Design Notes.md\n'
+    '--- a/my docs/Design Notes.md\n+++ b/my docs/Design Notes.md\n'
+    '@@ -1 +1 @@\n-x\n+y\n'
+)
+QUOTED_DOC = (
+    'diff --git "a/d\303\251sign.md" "b/d\303\251sign.md"\n'
+    '--- "a/d\303\251sign.md"\n+++ "b/d\303\251sign.md"\n'
+    '@@ -1 +1 @@\n-x\n+y\n'
+)
+DELETED_DOC = (
+    'diff --git a/docs/old.md b/docs/old.md\n'
+    'deleted file mode 100644\n--- a/docs/old.md\n+++ /dev/null\n'
+    '@@ -1 +0,0 @@\n-gone\n'
+)
+NEW_CODE = (
+    'diff --git a/src/new.py b/src/new.py\n'
+    'new file mode 100644\n--- /dev/null\n+++ b/src/new.py\n'
+    '@@ -0,0 +1 @@\n+print()\n'
+)
+
+
+def test_split_path_with_spaces():
+    code_diff, doc_diff = split_diff_by_type(SPACE_DOC)
+    assert code_diff == ""
+    assert "Design Notes.md" in doc_diff   # space-bearing doc routed correctly
+
+
+def test_split_quoted_path():
+    code_diff, doc_diff = split_diff_by_type(QUOTED_DOC)
+    assert code_diff == ""
+    assert doc_diff != ""                  # git-quoted .md routed to docs
+
+
+def test_split_deletion_uses_old_path():
+    code_diff, doc_diff = split_diff_by_type(DELETED_DOC)
+    assert code_diff == ""
+    assert "docs/old.md" in doc_diff       # +++ is /dev/null, falls back to --- path
+
+
+def test_split_new_file_uses_new_path():
+    code_diff, doc_diff = split_diff_by_type(NEW_CODE)
+    assert "src/new.py" in code_diff
+    assert doc_diff == ""
