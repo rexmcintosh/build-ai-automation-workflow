@@ -2156,8 +2156,7 @@ def main(argv=None) -> int:
         LoomState(cfg.state_path).advance(args.session_id, "pending")
         print(json.dumps({"requeued": args.session_id})); return 0
     if args.cmd == "rollback":
-        res = rollback(claude_root=cfg.claude_dir,
-                       backups_dir=cfg.loom_dir / "promote-backups", ts=args.ts)
+        res = rollback(backups_dir=cfg.loom_dir / "promote-backups", ts=args.ts)
         print(json.dumps(res)); return 0
     return 1
 
