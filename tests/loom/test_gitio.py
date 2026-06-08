@@ -50,3 +50,11 @@ def test_commits_since_counts_only_shadow(repo):
     assert repo.commits_since() == 0
     repo.commit_file("a.md", "A\n", ["s1#0"], "one")
     assert repo.commits_since() == 1
+
+
+def test_oldest_unpromoted_epoch(repo):
+    assert repo.oldest_unpromoted_epoch() is None     # empty range
+    repo.commit_file("a.md", "A\n", ["s1#0"], "one")
+    repo.commit_file("b.md", "B\n", ["s1#1"], "two")
+    epoch = repo.oldest_unpromoted_epoch()
+    assert isinstance(epoch, int) and epoch > 0

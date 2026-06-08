@@ -30,12 +30,12 @@ class ShadowRepo:
 
     def read(self, rel: str) -> Optional[str]:
         p = self.root / rel
-        return p.read_text() if p.exists() else None
+        return p.read_text(encoding="utf-8") if p.exists() else None
 
     def commit_file(self, rel: str, content: str, trailer_ids: List[str], message: str) -> Optional[str]:
         p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         self._git("add", "--", rel)
         # nothing staged (identical content) -> skip, signal no-op
         if self._git("diff", "--cached", "--quiet", check=False).returncode == 0:
