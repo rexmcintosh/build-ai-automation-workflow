@@ -1,5 +1,5 @@
-"""Per-session state machine. Each transcript advances pending → distilled →
-weaved → committed. Writes are atomic; reruns resume from the last clean state."""
+"""Per-session state machine. Sessions advance pending → distilled → weaved → committed,
+or are diverted to terminal quarantined. Writes are atomic; reruns resume from the last clean state."""
 from __future__ import annotations
 
 import json
