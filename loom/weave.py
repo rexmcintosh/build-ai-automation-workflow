@@ -1,0 +1,102 @@
+# loom/weave.py
+"""Weave one target file's bundle of learnings. The SCRIPT does all I/O and all
+fingerprinting; the model only returns prose. Flow: dedup -> model -> stamp
+fingerprints -> scoped shape-lints + all-routes sentinel -> bisect-on-fail ->
+commit (trailer + empty-diff skip). Returns {'committed': [...], 'rejected': [...]}."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List
+
+from . import sentinel
+from .fingerprint import learning_id, markers_in, with_markers
+from .weave_lint import is_trailing_append, is_excessive_rewrite
+
+_PROMPTS = Path(__file__).parent / "prompts"
+_SHAPE_LINTED_DIRS = {"people", "places", "companies", "projects", "eras",
+                      "transitions", "philosophies", "patterns", "relationships",
+                      "memory"}   # facts; NOT decisions/ (append) or MEMORY.md (index)
+
+
+def _shape_linted(directory: str, target: str) -> bool:
+    if Path(target).name == "MEMORY.md":
+        return False
+    return directory in _SHAPE_LINTED_DIRS
+
+
+def _weave_prompt(target: str, article: str, bundle: List[dict]) -> str:
+    learnings = "\n".join(f"- ({b['type']}) {b['subject']}: {b['learning']}" for b in bundle)
+    return (_PROMPTS / "weave.md").read_text() \
+        .replace("{{LEARNINGS}}", learnings) \
+        .replace("{{TARGET}}", target) \
+        .replace("{{ARTICLE}}", article or "(new article — none yet)")
+
+
+def _passes_guards(directory: str, target: str, before: str, after: str) -> bool:
+    if not sentinel.is_clean(after):                 # all routes
+        return False
+    if _shape_linted(directory, target):
+        if is_trailing_append(before, after):
+            return False
+        if is_excessive_rewrite(before, after):
+            return False
+    return True
+
+
+def _try_bundle(backend, before: str, directory: str, target: str, bundle: List[dict],
+                retry: bool = True):
+    """Return revised text if it passes guards, else None."""
+    prompt = _weave_prompt(target, before, bundle)
+    sys = "You are a careful wiki writer. Output only the full revised article."
+    after = backend.complete("weave", sys, prompt)
+    if _passes_guards(directory, target, before, after):
+        return after
+    if retry:
+        stronger = sys + " Integrate; do not restructure, append event-logs, or include shell/command text."
+        after = backend.complete("weave", stronger, prompt)
+        if _passes_guards(directory, target, before, after):
+            return after
+    return None
+
+
+def weave_target(backend, repo, ledger, target: str, directory: str,
+                 bundle: List[dict], today: str) -> Dict[str, List[str]]:
+    result = {"committed": [], "rejected": []}
+    before = repo.read(target) or ""
+    present = markers_in(before) | repo.committed_ids()
+
+    # Dedup: drop learnings already woven into this target / committed anywhere.
+    fresh = [b for b in bundle if b["id"] not in present]
+    for b in bundle:
+        if b["id"] in present:
+            ledger.mark(b["id"], "committed")
+            result["committed"].append(b["id"])
+    if not fresh:
+        return result
+
+    committed, rejected = _weave_recursive(backend, repo, ledger, target, directory, before, fresh)
+    result["committed"].extend(committed)
+    result["rejected"].extend(rejected)
+    return result
+
+
+def _weave_recursive(backend, repo, ledger, target, directory, before, bundle):
+    """Weave a bundle; on guard failure bisect down to the offender(s)."""
+    after = _try_bundle(backend, before, directory, target, bundle)
+    if after is not None:
+        ids = [b["id"] for b in bundle]
+        stamped = with_markers(after, ids)
+        sha = repo.commit_file(target, stamped, ids, f"weave: {target}")
+        for b in bundle:
+            ledger.mark(b["id"], "committed", commit_sha=sha)
+        return ids, []
+    if len(bundle) == 1:
+        ledger.reject(bundle[0]["id"], "weave failed guards after retry")
+        return [], [bundle[0]["id"]]
+    mid = len(bundle) // 2
+    # Re-read `before` fresh each half: the first half may have committed.
+    c1, r1 = _weave_recursive(backend, repo, ledger, target, directory,
+                              repo.read(target) or "", bundle[:mid])
+    c2, r2 = _weave_recursive(backend, repo, ledger, target, directory,
+                              repo.read(target) or "", bundle[mid:])
+    return c1 + c2, r1 + r2
