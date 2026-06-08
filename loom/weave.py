@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from . import sentinel
-from .fingerprint import learning_id, markers_in, with_markers
+from .fingerprint import markers_in, with_markers, strip_markers
 from .weave_lint import is_trailing_append, is_excessive_rewrite
 
 _PROMPTS = Path(__file__).parent / "prompts"
@@ -61,6 +61,7 @@ def _try_bundle(backend, before: str, directory: str, target: str, bundle: List[
 
 def weave_target(backend, repo, ledger, target: str, directory: str,
                  bundle: List[dict], today: str) -> Dict[str, List[str]]:
+    # `today` is accepted for caller-signature parity (run.py); index date-stamping lives in run.py.
     result = {"committed": [], "rejected": []}
     before = repo.read(target) or ""
     present = markers_in(before) | repo.committed_ids()
@@ -68,7 +69,7 @@ def weave_target(backend, repo, ledger, target: str, directory: str,
     # Dedup: drop learnings already woven into this target / committed anywhere.
     fresh = [b for b in bundle if b["id"] not in present]
     for b in bundle:
-        if b["id"] in present:
+        if b["id"] in present and ledger.status_of(b["id"]) != "rejected":
             ledger.mark(b["id"], "committed")
             result["committed"].append(b["id"])
     if not fresh:
@@ -85,7 +86,8 @@ def _weave_recursive(backend, repo, ledger, target, directory, before, bundle):
     after = _try_bundle(backend, before, directory, target, bundle)
     if after is not None:
         ids = [b["id"] for b in bundle]
-        stamped = with_markers(after, ids)
+        authoritative = markers_in(before) | set(ids)
+        stamped = with_markers(strip_markers(after), authoritative)
         sha = repo.commit_file(target, stamped, ids, f"weave: {target}")
         for b in bundle:
             ledger.mark(b["id"], "committed", commit_sha=sha)

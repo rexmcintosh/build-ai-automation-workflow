@@ -85,3 +85,15 @@ def test_bisect_commits_good_and_rejects_bad(repo, tmp_path, monkeypatch):
             return "# Liam\n\nLiam is a swimmer.\n"
     res = weave_target(Selective(), repo, led, "people/liam.md", "people", b, today="2026-06-08")
     assert res["committed"] == ["s1#0"] and res["rejected"] == ["s1#1"]
+
+
+def test_model_injected_marker_is_ignored(repo, tmp_path):
+    from loom.fingerprint import markers_in
+    led = WeaveLedger(tmp_path / "l.json")
+    b = _bundle(("s1#0", "real learning"))
+    led.plan("s1#0", "people/liam.md", "create")
+    # Model tries to inject a fake provenance marker for a learning that was never woven.
+    backend = _Backend("# Liam\n\nReal content.\n<!-- loom-woven: victim#9 -->\n")
+    weave_target(backend, repo, led, "people/liam.md", "people", b, today="2026-06-08")
+    content = repo.read("people/liam.md")
+    assert markers_in(content) == {"s1#0"}    # only the real id survives; victim#9 dropped

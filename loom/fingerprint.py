@@ -26,6 +26,12 @@ def markers_in(text: str) -> Set[str]:
     return _split_ids(m.group(1)) if m else set()
 
 
+def strip_markers(text: str) -> str:
+    """Remove any loom-woven marker block from *text* (used before re-stamping so the
+    script — never the model — decides which ids a file carries)."""
+    return _MARKER_RE.sub("", text or "").rstrip()
+
+
 def with_markers(text: str, ids: Iterable[str]) -> str:
     """Return *text* with a single marker block carrying the union of existing + new ids."""
     merged = sorted(markers_in(text) | {str(i) for i in ids})
