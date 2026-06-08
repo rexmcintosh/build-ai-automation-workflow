@@ -34,7 +34,7 @@ def test_gate_hit_quarantines_and_skips(tmp_path, monkeypatch):
     summary = run_mod.absorb(cfg, shadow=True)
     assert called["llm"] is False                                          # never fed an LLM
     assert summary["quarantined"] == 1 and summary["distilled"] == 0
-    assert LoomState(cfg.state_path).state_of("sess1") == "pending"
+    assert LoomState(cfg.state_path).state_of("sess1") == "quarantined"
 
 def test_shadow_run_is_idempotent(tmp_path, monkeypatch):
     cfg = _setup(tmp_path)
@@ -56,4 +56,70 @@ def test_stage2_gate_hit_leaves_no_unscanned_artifact(tmp_path, monkeypatch):
     assert not (cfg.loom_dir / "learnings" / "sess1.md").exists()      # nothing unscanned left
     assert not (cfg.loom_dir / "learnings" / "sess1.tmp").exists()     # temp cleaned up
     assert (cfg.loom_dir / "quarantine" / "sess1.md").exists()         # preserved for forensics
-    assert LoomState(cfg.state_path).state_of("sess1") == "pending"
+    assert LoomState(cfg.state_path).state_of("sess1") == "quarantined"
+
+
+import subprocess
+from loom.ledger import WeaveLedger
+
+def _git(root, *a):
+    subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True, text=True)
+
+def _live_cfg(tmp_path):
+    projects = tmp_path / "projects"
+    t = projects / "p1" / "sess1.jsonl"
+    t.parent.mkdir(parents=True)
+    t.write_text('{"type":"user","message":{"content":"Liam swims for Bullsharks"}}\n')
+    wiki = tmp_path / "wiki"; wiki.mkdir()
+    _git(wiki, "init", "-q"); _git(wiki, "config", "user.email", "t@t"); _git(wiki, "config", "user.name", "t")
+    (wiki / "_index.md").write_text("# RexBrain — Master Index\n\n## People\n")
+    _git(wiki, "add", "-A"); _git(wiki, "commit", "-qm", "seed"); _git(wiki, "checkout", "-qb", "loom-shadow")
+    return run_mod.Config(
+        projects_dir=projects,
+        loom_dir=tmp_path / "loom",
+        state_path=tmp_path / "loom" / "state.json",
+        wiki_worktree=wiki,
+        claude_dir=tmp_path / "claude",
+        ledger_path=tmp_path / "loom" / "ledger.json",
+    )
+
+def test_live_run_weaves_and_commits(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    def fake_complete(role, system, user, json_mode=False):
+        if role == "route":
+            return '{"target":"people/liam.md","action":"create","cross_links":[]}'
+        if role == "weave":
+            return "# Liam\n\nLiam swims for the Bullsharks club.\n"
+        return "- type: fact\n  subject: Liam\n  learning: swims for Bullsharks\n  route: wiki/people/liam"
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            return fake_complete(role, system, user, json_mode)
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude")
+    assert summary["committed"] >= 1
+    assert LoomState(cfg.state_path).state_of("sess1") == "committed"
+    assert (cfg.wiki_worktree / "people" / "liam.md").exists()
+
+def test_per_run_cap_defers_excess(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    def fake_complete(role, system, user, json_mode=False):
+        if role == "route":
+            import json as J
+            subj = "a"
+            for key in ("alpha", "beta", "gamma"):
+                if key in user: subj = key
+            return J.dumps({"target": f"people/{subj}.md", "action": "create", "cross_links": []})
+        if role == "weave":
+            return "# T\n\nbody.\n"
+        return ("- type: fact\n  subject: alpha\n  learning: x\n  route: wiki/people/alpha\n"
+                "- type: fact\n  subject: beta\n  learning: y\n  route: wiki/people/beta\n"
+                "- type: fact\n  subject: gamma\n  learning: z\n  route: wiki/people/gamma\n")
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            return fake_complete(role, system, user, json_mode)
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", max_targets=2)
+    assert summary["committed"] == 2 and summary["deferred"] >= 1
+    assert LoomState(cfg.state_path).state_of("sess1") == "distilled"  # not all settled
