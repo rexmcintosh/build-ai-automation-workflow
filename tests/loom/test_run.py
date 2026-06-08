@@ -172,3 +172,27 @@ def test_run_deadline_stops_processing(tmp_path, monkeypatch):
     summary = run_mod.absorb(cfg, shadow=False, backend="claude", deadline_seconds=5)
     assert summary["deadline_hit"] is True
     assert summary["distilled"] == 0          # distill loop broke before processing
+
+
+def test_cached_route_is_reused_not_recomputed(tmp_path, monkeypatch):
+    from loom.ledger import WeaveLedger
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    # 1) distill sess1 -> one learning, session 'distilled', artifact written
+    class D:
+        def complete(self, role, system, user, json_mode=False):
+            assert role == "distill"
+            return "- type: fact\n  subject: x\n  learning: y\n  route: wiki/people/x"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: D())
+    run_mod.absorb(cfg, shadow=True)
+    # 2) pre-seed a cached route for sess1#0 in the ledger
+    WeaveLedger(cfg.ledger_path).plan("sess1#0", "people/cached.md", "create")
+    # 3) weave with a backend that ASSERTS if route is recomputed -> must reuse the cached route
+    class W:
+        def complete(self, role, system, user, json_mode=False):
+            assert role != "route", "route must not be recomputed for a cached learning"
+            return "# Cached\n\nbody.\n"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: W())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", distill=False)
+    assert summary["committed"] == 1
+    assert (cfg.wiki_worktree / "people" / "cached.md").exists()   # woven to the cached target

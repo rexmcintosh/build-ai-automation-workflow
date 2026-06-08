@@ -152,11 +152,15 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
             ids_here.append(lid)
             if ledger.status_of(lid) in ("committed", "rejected"):
                 continue
-            route = confirm_route(be, learning, index_listing)
-            if not route:
-                ledger.defer(lid, "unroutable")
-                continue
-            ledger.plan(lid, route["target"], route["action"])
+            cached = ledger.entry(lid)
+            if cached.get("target"):              # routed in a prior run — reuse, no model call
+                route = {"target": cached["target"], "action": cached.get("action", "update")}
+            else:
+                route = confirm_route(be, learning, index_listing)
+                if not route:
+                    ledger.defer(lid, "unroutable")
+                    continue
+                ledger.plan(lid, route["target"], route["action"])
             entry = dict(learning)
             entry.update(id=lid, target=route["target"],
                          directory=route["target"].split("/", 1)[0])
