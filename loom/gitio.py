@@ -44,6 +44,15 @@ class ShadowRepo:
         self._git("commit", "-q", "-m", msg)
         return self._git("rev-parse", "HEAD").stdout.strip()
 
+    def commit_paths(self, paths: List[str], message: str) -> Optional[str]:
+        """Stage the given paths and commit if anything changed; returns sha or None (no-op)."""
+        for p in paths:
+            self._git("add", "--", p, check=False)
+        if self._git("diff", "--cached", "--quiet", check=False).returncode == 0:
+            return None
+        self._git("commit", "-q", "-m", message)
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
     def committed_ids(self) -> Set[str]:
         blob = self._git("log", f"{self.base}..HEAD", "--format=%B%x00").stdout
         return ids_from_trailers(blob)

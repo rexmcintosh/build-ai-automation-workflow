@@ -58,3 +58,10 @@ def test_oldest_unpromoted_epoch(repo):
     repo.commit_file("b.md", "B\n", ["s1#1"], "two")
     epoch = repo.oldest_unpromoted_epoch()
     assert isinstance(epoch, int) and epoch > 0
+
+
+def test_commit_paths_commits_changed_and_skips_noop(repo):
+    (repo.root / "_index.md").write_text("idx\n", encoding="utf-8")
+    sha = repo.commit_paths(["_index.md"], "index")
+    assert sha and len(sha) >= 7
+    assert repo.commit_paths(["_index.md"], "index again") is None   # no change -> no-op

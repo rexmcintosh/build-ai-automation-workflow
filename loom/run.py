@@ -9,7 +9,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import yaml
 
@@ -37,12 +37,12 @@ class Config:
     loom_dir: Path
     state_path: Path
     wiki_worktree: Optional[Path] = None
-    claude_dir: Optional[Path] = None
+    claude_dir: Optional[Path] = None  # claude_dir: used by promote (CLI), not by absorb/weave
     ledger_path: Optional[Path] = None
 
 
 def _distill_prompt(text: str) -> str:
-    return (_PROMPTS / "distill.md").read_text().replace("{{TRANSCRIPT}}", text)
+    return (_PROMPTS / "distill.md").read_text(encoding="utf-8").replace("{{TRANSCRIPT}}", text)
 
 
 def _parse_learnings(artifact_text: str) -> List[dict]:
@@ -55,7 +55,7 @@ def _parse_learnings(artifact_text: str) -> List[dict]:
 
 def _index_listing(wiki: Path) -> str:
     idx = wiki / "_index.md"
-    return idx.read_text() if idx.exists() else ""
+    return idx.read_text(encoding="utf-8") if idx.exists() else ""
 
 
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
@@ -72,6 +72,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
         return deadline_seconds is not None and (time.monotonic() - start) > deadline_seconds
 
     # ---------- Stage 1: distill (v0) ----------
+    be = get_backend(backend)
     for transcript in find_pending(cfg.projects_dir, state):
         if _expired():
             summary["deadline_hit"] = True
@@ -88,7 +89,6 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
         spool_copy(transcript, spool_dir)
         try:
             text = extract_text(transcript)
-            be = get_backend(backend)
             learnings = be.complete("distill", "Extract durable learnings.", _distill_prompt(text))
         except Exception:
             logging.exception("distill failed for %s", transcript)
@@ -97,7 +97,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
         learnings_dir.mkdir(parents=True, exist_ok=True)
         artifact = learnings_dir / f"{sid}.md"
         tmp_artifact = learnings_dir / f"{sid}.tmp"
-        tmp_artifact.write_text(learnings + "\n")
+        tmp_artifact.write_text(learnings + "\n", encoding="utf-8")
         if not scan_clean(tmp_artifact):
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
@@ -116,7 +116,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     return summary
 
 
-def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired):
+def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: Callable[[], bool]):
     repo = ShadowRepo(cfg.wiki_worktree, base="master")
     ledger = WeaveLedger(cfg.ledger_path)
     ledger.reconcile_from_git(repo.committed_ids())          # git is authoritative
@@ -137,7 +137,7 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired):
         if not art.exists():
             state.advance(sid, "committed")                 # zero-learning session
             continue
-        items = _parse_learnings(art.read_text())
+        items = _parse_learnings(art.read_text(encoding="utf-8"))
         if not items:
             state.advance(sid, "committed")
             continue
@@ -167,7 +167,14 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired):
                 ledger.defer(entry["id"], "run deadline")
                 summary["deferred"] += 1
             continue
-        res = weave_target(be, repo, ledger, target, dirs[target], buckets[target], today=today)
+        try:
+            res = weave_target(be, repo, ledger, target, dirs[target], buckets[target], today=today)
+        except Exception:
+            logging.exception("weave_target failed for %s", target)
+            for entry in buckets[target]:
+                ledger.defer(entry["id"], "weave exception")
+                summary["deferred"] += 1
+            continue
         summary["committed"] += len(res["committed"])
         summary["rejected"] += len(res["rejected"])
         if res["committed"]:
@@ -180,21 +187,16 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired):
             summary["deferred"] += 1
 
     rebuild_backlinks(cfg.wiki_worktree)
-    _commit_index(repo)
+    repo.commit_paths(["_index.md", "_backlinks.json"], "index: rebuild _index/_backlinks")
 
     for sid, ids in session_learnings.items():
         statuses = [ledger.status_of(i) for i in ids]
         if all(s in ("committed", "rejected") for s in statuses):
             state.advance(sid, "committed")
+        # 'weaved' is reachable only if a future change separates write from commit; today commit_file is atomic so learnings go planned->committed directly.
         elif all(s in ("committed", "rejected", "woven") for s in statuses):
             state.advance(sid, "weaved")
         # else stays distilled
-
-
-def _commit_index(repo: ShadowRepo) -> None:
-    repo._git("add", "_index.md", "_backlinks.json", check=False)
-    if repo._git("diff", "--cached", "--quiet", check=False).returncode != 0:
-        repo._git("commit", "-q", "-m", "index: rebuild _index/_backlinks")
 
 
 def _sessions_at_least(state: LoomState, floor: str) -> List[str]:
