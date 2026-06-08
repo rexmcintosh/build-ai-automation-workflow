@@ -75,6 +75,8 @@ def main(argv=None) -> int:
                       backups_dir=cfg.loom_dir / "promote-backups", expect_unmodified=True)
         print(json.dumps(res, cls=_PathEncoder)); return 0
     if args.cmd == "requeue":
+        # Re-queue a quarantined/stuck session -> next `absorb` re-runs Stage-0 from scratch.
+        # (A committed session won't re-weave: git trailers reconcile it back to committed.)
         LoomState(cfg.state_path).advance(args.session_id, "pending")
         print(json.dumps({"requeued": args.session_id})); return 0
     if args.cmd == "rollback":

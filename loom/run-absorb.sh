@@ -21,14 +21,12 @@ echo "[$TS] rc=$RC $OUT" >>"$LOG"
 # Build the Telegram message (scrubbed) from the JSON summary; fall back on failure text.
 MSG="$("$REPO/.venv/bin/python" - "$RC" "$OUT" <<'PY' 2>/dev/null
 import sys, json
-from loom.summary import scrub
+from loom.summary import format_run_summary, scrub
 rc, out = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else ""
 try:
-    c = json.loads(out)
-    line = "🧵 Loom run " + " ".join(f"{k}={v}" for k, v in c.items())
+    print(format_run_summary(json.loads(out)))
 except Exception:
-    line = f"⚠️ Loom absorb failed (rc={rc}). Check loom/logs/."
-print(scrub(line))
+    print(scrub(f"⚠️ Loom absorb failed (rc={rc}). Check loom/logs/."))
 PY
 )"
 [ -z "$MSG" ] && MSG="⚠️ Loom absorb (rc=$RC). Check loom/logs/."

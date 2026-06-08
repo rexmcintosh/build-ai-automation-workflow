@@ -1,5 +1,5 @@
 # tests/loom/test_summary.py
-from loom.summary import build_summary, scrub
+from loom.summary import build_summary, scrub, format_run_summary
 
 
 def test_build_summary_lists_counts_and_rejections():
@@ -39,3 +39,11 @@ def test_build_summary_scrubs_secrets_in_items():
     assert fake_pat not in s and "ghp_" not in s
     assert "-----BEGIN PRIVATE KEY-----" not in s
     assert "<redacted>" in s
+
+
+def test_format_run_summary_from_absorb_dict():
+    d = {"committed": 2, "deferred": 1, "rejected": 1,
+         "rejected_items": [["s1#0", "sentinel hit"]],
+         "shadow_commits": 5, "oldest_age_days": 9}
+    s = format_run_summary(d)
+    assert "committed=2" in s and "s1#0" in s and "STALE" in s and "5 commits" in s

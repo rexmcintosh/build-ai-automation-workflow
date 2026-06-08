@@ -59,7 +59,7 @@ def _index_listing(wiki: Path) -> str:
 
 
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
-           max_targets: int = 10, today: str = "", deadline_seconds=None) -> Dict[str, int]:
+           max_targets: int = 10, today: str = "", deadline_seconds=None) -> Dict[str, object]:
     state = LoomState(cfg.state_path)
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
@@ -179,7 +179,9 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: C
         summary["rejected"] += len(res["rejected"])
         if res["committed"]:
             slug = Path(target).stem
-            summ = buckets[target][0]["learning"][:120]
+            committed_set = set(res["committed"])
+            first = next((b for b in buckets[target] if b["id"] in committed_set), buckets[target][0])
+            summ = first["learning"][:120]
             upsert_index_entry(cfg.wiki_worktree, slug, dirs[target], summ, today=today)
     for target in targets[max_targets:]:
         for entry in buckets[target]:
@@ -197,6 +199,11 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: C
         elif all(s in ("committed", "rejected", "woven") for s in statuses):
             state.advance(sid, "weaved")
         # else stays distilled
+
+    summary["rejected_items"] = ledger.rejected()
+    summary["shadow_commits"] = repo.commits_since()
+    oldest = repo.oldest_unpromoted_epoch()
+    summary["oldest_age_days"] = int((time.time() - oldest) / 86400) if oldest else 0
 
 
 def _sessions_at_least(state: LoomState, floor: str) -> List[str]:

@@ -32,3 +32,18 @@ def build_summary(counts: Dict[str, int], shadow_commits: int, oldest_age_days: 
         parts.append("proposed (not applied):")
         parts += [f"  • {p}" for p in proposed]
     return scrub("\n".join(parts))
+
+
+_COUNT_KEYS = ("distilled", "quarantined", "failed", "committed", "deferred",
+               "rejected", "deadline_hit")
+
+
+def format_run_summary(d: dict) -> str:
+    """Build the scrubbed Telegram message from an `absorb` return dict."""
+    counts = {k: d[k] for k in _COUNT_KEYS if k in d}
+    rejected = [tuple(x) for x in d.get("rejected_items", [])]
+    return build_summary(counts=counts,
+                         shadow_commits=int(d.get("shadow_commits", 0)),
+                         oldest_age_days=int(d.get("oldest_age_days", 0)),
+                         rejected=rejected,
+                         proposed=d.get("proposed", []))
