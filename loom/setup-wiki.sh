@@ -40,7 +40,7 @@ git add -A && git commit -q -m "loom: initial wiki snapshot" || true
 git branch -f loom-shadow
 # v1: a dedicated worktree on loom-shadow so ~/wiki stays on master during runs.
 WORKTREE="/home/dev/wiki-loom-shadow"
-git worktree prune -q   # clear any stale registration (dir removed without prune)
+git worktree prune   # clear any stale registration (dir removed without prune)
 if [ ! -d "$WORKTREE" ]; then
   git worktree add -q "$WORKTREE" loom-shadow
 fi
