@@ -61,3 +61,19 @@ def render_terminal(question: str, syn: Synthesis, results: list[MemberResult],
     # Reuse markdown; terminals render it fine. Strip the <details> wrappers.
     md = render_markdown(question, syn, results, rigor=rigor)
     return md.replace("<details><summary>Raw panel</summary>", "── Raw panel ──").replace("</details>", "")
+
+
+def render_combined(sections, *, rigor: str = "daily") -> str:
+    """Render multiple review sections into one comment body.
+
+    sections: list of (title, advisory_note, question, syn, results).
+    Each section gets a header, an optional italic note, then the standard
+    synthesis-on-top markdown.
+    """
+    out = ["# Council Review", ""]
+    for title, note, question, syn, results in sections:
+        out.append(f"## {title}")
+        if note:
+            out += ["", f"_{note}_"]
+        out += ["", render_markdown(question, syn, results, rigor=rigor), ""]
+    return "\n".join(out)
