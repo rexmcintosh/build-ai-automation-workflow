@@ -30,18 +30,18 @@ def rebuild_backlinks(root: Path) -> None:
     back: Dict[str, set] = {}
     for art in _articles(root):
         slug = art.stem
-        for m in _WIKILINK.finditer(art.read_text()):
+        for m in _WIKILINK.finditer(art.read_text(encoding="utf-8")):
             target = m.group(1).strip()
             if target and target != slug:
                 back.setdefault(target, set()).add(slug)
     out = {k: sorted(v) for k, v in sorted(back.items())}
-    (root / "_backlinks.json").write_text(json.dumps(out, indent=2) + "\n")
+    (root / "_backlinks.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
 
 
 def upsert_index_entry(root: Path, slug: str, directory: str, summary: str, today: str) -> None:
     root = Path(root)
     idx = root / "_index.md"
-    text = idx.read_text() if idx.exists() else "# RexBrain — Master Index\n"
+    text = idx.read_text(encoding="utf-8") if idx.exists() else "# RexBrain — Master Index\n"
     if f"[[{slug}]]" in text:                      # already indexed — idempotent
         return
     section = SECTION_FOR.get(directory, "Unsorted")
@@ -55,4 +55,4 @@ def upsert_index_entry(root: Path, slug: str, directory: str, summary: str, toda
         lines += ["", heading, line]
     text = "\n".join(lines) + ("\n" if not text.endswith("\n") else "")
     text = re.sub(r"(?m)^(last_updated:).*$", rf"\1 {today}", text)
-    idx.write_text(text if text.endswith("\n") else text + "\n")
+    idx.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
