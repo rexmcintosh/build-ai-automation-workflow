@@ -1,7 +1,9 @@
 state.json
+weave_ledger.json
 spool/
 quarantine/
 learnings/
 logs/
+promote-backups/
 *.lock
 *.err
