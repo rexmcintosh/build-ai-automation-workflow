@@ -57,6 +57,17 @@ def test_rollback_restores_from_manifest(env):
     tgt = env["claude"] / "memory" / "feedback-x.md"
     tgt.write_text("changed after promote\n")
     ts = sorted(p.name for p in env["backups"].iterdir())[-1]
-    rollback(claude_root=env["claude"], backups_dir=env["backups"], ts=ts)
+    rollback(backups_dir=env["backups"], ts=ts)
     # the pre-promote state for a NEWLY created file is absence
     assert not tgt.exists()
+
+
+def test_rollback_restores_preexisting_file(env):
+    # a file that already exists in ~/.claude before promote (will be backed up)
+    tgt = env["claude"] / "memory" / "feedback-x.md"
+    tgt.write_text("ORIGINAL\n")
+    promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"])
+    assert tgt.read_text() == "a new preference\n"          # promote overwrote it
+    ts = sorted(p.name for p in env["backups"].iterdir())[-1]
+    rollback(backups_dir=env["backups"], ts=ts)
+    assert tgt.read_text() == "ORIGINAL\n"                  # restored from backup

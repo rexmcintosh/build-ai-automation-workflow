@@ -20,15 +20,10 @@ class PromoteError(RuntimeError):
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8")
     if check and proc.returncode != 0:
         raise PromoteError(f"git {' '.join(args)}: {proc.stderr.strip()}")
     return proc
-
-
-def _staged_files(wiki_root: Path) -> List[Path]:
-    base = wiki_root / _STAGE
-    return sorted(p for p in base.rglob("*") if p.is_file()) if base.exists() else []
 
 
 def _shadow_has_stage(wiki_root: Path) -> List[str]:
@@ -79,12 +74,16 @@ def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
         for target, content, _existed in plan:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_suffix(target.suffix + ".loomtmp")
-            tmp.write_text(content)
-            tmp.replace(target)                          # atomic on POSIX
+            try:
+                tmp.write_text(content, encoding="utf-8")
+                tmp.replace(target)                          # atomic on POSIX
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
             applied.append(target)
         # 4. drop _staged on shadow, then merge -> master
         _git(wiki_root, "checkout", "-q", "loom-shadow")
-        if _shadow_has_stage(wiki_root):
+        if rels:
             _git(wiki_root, "rm", "-q", "-r", _STAGE.split("/")[0])  # remove _staged/
             _git(wiki_root, "commit", "-q", "-m", "promote: drop staged .claude mirror")
         _git(wiki_root, "checkout", "-q", "master")
@@ -92,6 +91,9 @@ def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
     except Exception as e:                               # 5. ROLLBACK
         _rollback_manifest(manifest)
         _git(wiki_root, "merge", "--abort", check=False)
+        _git(wiki_root, "checkout", "-q", "-f", "loom-shadow", check=False)
+        _git(wiki_root, "reset", "-q", "--hard", "HEAD", check=False)
+        _git(wiki_root, "checkout", "-q", "-f", "master", check=False)
         raise PromoteError(f"promote failed, rolled back: {e}") from e
     return {"applied": len(applied), "ts": ts}
 
@@ -105,7 +107,7 @@ def _rollback_manifest(manifest: List[dict]) -> None:
             target.unlink()                              # newly created -> remove
 
 
-def rollback(claude_root: Path, backups_dir: Path, ts: str) -> dict:
+def rollback(backups_dir: Path, ts: str) -> dict:
     manifest_path = Path(backups_dir) / ts / "manifest.json"
     if not manifest_path.exists():
         raise PromoteError(f"no manifest for ts={ts}")
