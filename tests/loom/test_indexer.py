@@ -1,6 +1,6 @@
 # tests/loom/test_indexer.py
 from pathlib import Path
-from loom.indexer import rebuild_backlinks, upsert_index_entry, SECTION_FOR
+from loom.indexer import rebuild_backlinks, upsert_index_entry, SECTION_FOR, clean_summary
 import json
 
 
@@ -40,3 +40,26 @@ def test_upsert_index_entry_is_idempotent(tmp_path):
     for _ in range(2):
         upsert_index_entry(tmp_path, "liam", "people", "Son.", today="2026-06-08")
     assert (tmp_path / "_index.md").read_text().count("[[liam]]") == 1
+
+
+def test_clean_summary_truncates_at_word_boundary():
+    short = "A concise summary."
+    assert clean_summary(short) == short                       # under limit, unchanged
+    long = ("The only Hermes reference under projects is the hermes-parser package inside "
+            "finance-tracker node_modules and it is a transitive dependency")
+    out = clean_summary(long)
+    assert out.endswith("…") and len(out) <= 111
+    assert not out[:-1].endswith(" ")                          # no trailing space before ellipsis
+    assert out[:-1] in long or long.startswith(out[:-1])       # it's a clean prefix, not mid-word garbage
+    # collapses internal whitespace/newlines
+    assert clean_summary("a\n\n  b   c") == "a b c"
+
+
+def test_upsert_increments_total_pages(tmp_path):
+    (tmp_path / "_index.md").write_text(
+        "---\ntotal_pages: 26\n---\n\n# RexBrain — Master Index\n\n> ... Total pages: 26\n\n## People\n"
+    )
+    upsert_index_entry(tmp_path, "liam", "people", "Rex's son.", today="2026-06-09")
+    txt = (tmp_path / "_index.md").read_text()
+    assert "total_pages: 27" in txt          # frontmatter bumped
+    assert "Total pages: 27" in txt          # intro line bumped

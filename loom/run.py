@@ -197,8 +197,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
             slug = Path(target).stem
             committed_set = set(res["committed"])
             first = next((b for b in weave_now if b["id"] in committed_set), weave_now[0])
-            summ = first["learning"][:120]
-            upsert_index_entry(cfg.wiki_worktree, slug, dirs[target], summ, today=today)
+            upsert_index_entry(cfg.wiki_worktree, slug, dirs[target], first["learning"], today=today)
     for target in targets[max_targets:]:
         for entry in buckets[target]:
             ledger.defer(entry["id"], "per-run cap")
