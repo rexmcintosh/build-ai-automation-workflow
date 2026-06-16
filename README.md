@@ -22,6 +22,23 @@ The dev infrastructure model: **Claude Code runs on a Hetzner VPS → opens PRs 
 - [`docs/DAILY-LOOP.md`](docs/DAILY-LOOP.md) — the operating manual (start / suspend / push / resume anywhere)
 - `scripts/` — [`audit-projects.sh`](scripts/audit-projects.sh) (inventory) · [`migrate-project.sh`](scripts/migrate-project.sh) (migrate)
 
+## Components (the AI layer)
+
+- [`council/`](council/README.md) — multi-model Venice review panel. `review`/`ask`,
+  plus `compare` (rank N candidate solutions — "waste tokens, save time") and `sweep`
+  (autonomous repo-wide security research).
+- [`watchdog/`](watchdog/README.md) — autonomous SRE: watches the system's own moving
+  parts and proposes fixes to Telegram (never touches prod).
+- [`fixit/`](fixit/README.md) — feedback → fix → ship: an issue becomes a PR into the
+  council CI gate; you merge.
+- [`bebop/`](bebop/README.md) — personal assistant: twice-daily Gmail+Calendar briefing.
+- [`loom/`](loom/README.md) — session-learning pipeline: distills transcripts into woven
+  learnings.
+
+> watchdog, `council compare`/`sweep`, and fixit were distilled from Naval's
+> *AI Industrial Revolution* podcast — see
+> [`docs/superpowers/specs/2026-06-16-industrial-features-design.md`](docs/superpowers/specs/2026-06-16-industrial-features-design.md).
+
 ## Layout
 
 - `setup/PLAYBOOK.md` — implementation playbook (start here)
