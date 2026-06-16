@@ -21,6 +21,7 @@ parallel, blind to each other, so their agreement is meaningful.
     council review path/to/file.py
     council review --diff                                       # reviews `git diff`
     council compare --task "make f handle empties" a.py b.py    # rank candidates, pick a winner
+    council sweep path/to/repo                                  # repo-wide security sweep
     council panels                                              # list councils + seats
 
 Flags: `--panel NAME` (skip the router), `--rigor daily|deep` (noise gate),
@@ -38,6 +39,15 @@ self-contained prompt:
 generates K candidates across K Venice models in parallel and pipes them to `compare`.
 For repo-wide code building, generate candidates with `claude` / parallel git worktrees
 instead, then `council compare` the results.
+
+## sweep — autonomous security research
+
+`council sweep <path>` walks a whole tree, fans the `red-team` panel across it chunk
+by chunk, **dedups** findings, **gates** by confidence (critical always kept), sorts
+worst-first, and has the chair write a phone-glanceable summary. It is deliberately
+**bounded** — `--max-chunks` caps coverage and the report states how many files were
+dropped, so it never silently claims to have scanned everything. It reports; it opens
+nothing. `council/scripts/security-sweep.sh` is the scheduled runner (Telegram summary).
 
 ## Panels
 

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .models import Finding, MemberResult, Synthesis, ComparisonResult
+from .models import Finding, MemberResult, Synthesis, ComparisonResult, SweepReport
 
 _MIN_CONF = {"daily": 8, "deep": 2}
 
@@ -84,6 +84,28 @@ def render_comparison(task: str, res: ComparisonResult) -> str:
         out += [f"#### {v.member} · {v.model} — pick: {v.pick}",
                 f"ranking: {' > '.join(v.ranking)}" if v.ranking else "",
                 f"_{v.rationale}_", ""]
+    return "\n".join(out)
+
+
+def render_sweep(path: str, rep: SweepReport) -> str:
+    """Render a `council sweep` report: chair summary on top, findings worst-first,
+    and an explicit coverage line (scanned / dropped — never a silent cap)."""
+    out = ["## Council — security sweep", "", f"**Target:** {path}", ""]
+    out += [f"### Summary", "", rep.summary, ""]
+    if rep.error:
+        out += [f"_summary error: {rep.error}_", ""]
+    if rep.findings:
+        out += [f"### Findings ({len(rep.findings)})", ""]
+        for f in rep.findings:
+            loc = ", ".join(f.locations)
+            src = ", ".join(f.sources)
+            out.append(f"- `{f.severity}` (c{f.confidence}) {f.point}  "
+                       f"_— {loc} · raised by {src}_")
+        out.append("")
+    else:
+        out += ["_No findings above the confidence gate._", ""]
+    out += [f"---", f"Coverage: scanned {rep.chunks_scanned} file(s); "
+            f"{rep.dropped} eligible file(s) dropped by the chunk cap."]
     return "\n".join(out)
 
 

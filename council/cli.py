@@ -112,6 +112,13 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
     c.add_argument("--panel", default="code-review")
     c.add_argument("--format", default="term"); c.add_argument("--panels")
 
+    sw = sub.add_parser("sweep", help="repo-wide security sweep")
+    sw.add_argument("path", help="file or directory to sweep")
+    sw.add_argument("--panel", default="red-team")
+    sw.add_argument("--max-chunks", type=int, default=40)
+    sw.add_argument("--min-conf", type=int, default=7)
+    sw.add_argument("--format", default="term"); sw.add_argument("--panels")
+
     sub.add_parser("panels", help="list councils").add_argument("--panels", nargs="?")
 
     args = p.parse_args(argv)
@@ -204,6 +211,25 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
         from .render import render_comparison
         print(f"[compare · panel: {args.panel} · {len(candidates)} candidates]\n")
         print(render_comparison(args.task, res))
+        return 0
+
+    if args.cmd == "sweep":
+        from .sweep import chunk_repo, run_sweep
+        from .render import render_sweep
+        if args.panel not in panels:
+            print(f"error: unknown panel '{args.panel}'. Available: "
+                  f"{', '.join(panels)}.", file=sys.stderr)
+            return 2
+        chunks, dropped = chunk_repo(args.path, cap=settings.byte_cap,
+                                     max_chunks=args.max_chunks)
+        if not chunks:
+            print(f"Nothing to scan at '{args.path}'.")
+            return 0
+        report = run_sweep(chunks, panels[args.panel], client,
+                           chair_model=settings.chair_model, min_conf=args.min_conf)
+        report.dropped = dropped
+        print(f"[sweep · panel: {args.panel} · {report.chunks_scanned} files]\n")
+        print(render_sweep(args.path, report))
         return 0
 
     return 1

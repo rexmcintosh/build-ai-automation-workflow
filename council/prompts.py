@@ -61,6 +61,15 @@ COMPARE_SYNTH = textwrap.dedent("""\
     just their votes. The winner must be one of the actual candidate labels.
 """)
 
+SWEEP_SUMMARY = textwrap.dedent("""\
+    You are the CHAIR of a security sweep. Panelists scanned a codebase chunk by
+    chunk; below is the DEDUPED set of findings they surfaced (already gated by
+    confidence). Write a short executive summary for a phone-glanceable alert:
+    the top real risks first, what to fix first, and call out anything that looks
+    like a false positive. Respond with ONLY a JSON object:
+    {"summary": "a few tight sentences, most severe first"}
+""")
+
 ROUTER_PROMPT = textwrap.dedent("""\
     Pick the single best panel for the user's input. Respond with ONLY:
     {"panel": "<one of the names below>"}
