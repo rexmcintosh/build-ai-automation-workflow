@@ -59,7 +59,8 @@ def _index_listing(wiki: Path) -> str:
 
 
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
-           max_targets: int = 10, today: str = "", deadline_seconds=None) -> Dict[str, object]:
+           max_targets: int = 10, today: str = "", deadline_seconds=None,
+           max_per_target: int = 4, distill: bool = True) -> Dict[str, object]:
     state = LoomState(cfg.state_path)
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
@@ -72,51 +73,55 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
         return deadline_seconds is not None and (time.monotonic() - start) > deadline_seconds
 
     # ---------- Stage 1: distill (v0) ----------
+    # `distill=False` (used by `backfill`) weaves the already-distilled backlog only — it never
+    # tries to distill new pending sessions (the nightly `absorb` on the Claude backend does that).
     be = get_backend(backend)
-    for transcript in find_pending(cfg.projects_dir, state):
-        if _expired():
-            summary["deadline_hit"] = True
-            break
-        sid = session_id_for(transcript)
-        if _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
-            continue
-        if not scan_clean(transcript):
-            quarantine_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(transcript, quarantine_dir / transcript.name)
-            state.advance(sid, "quarantined")
-            summary["quarantined"] += 1
-            continue
-        spool_copy(transcript, spool_dir)
-        try:
-            text = extract_text(transcript)
-            learnings = be.complete("distill", "Extract durable learnings.", _distill_prompt(text))
-        except Exception:
-            logging.exception("distill failed for %s", transcript)
-            summary["failed"] += 1
-            continue
-        learnings_dir.mkdir(parents=True, exist_ok=True)
-        artifact = learnings_dir / f"{sid}.md"
-        tmp_artifact = learnings_dir / f"{sid}.tmp"
-        tmp_artifact.write_text(learnings + "\n", encoding="utf-8")
-        if not scan_clean(tmp_artifact):
-            quarantine_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
-            state.advance(sid, "quarantined")
-            summary["quarantined"] += 1
-            continue
-        tmp_artifact.rename(artifact)
-        state.advance(sid, "distilled")
-        summary["distilled"] += 1
+    if distill:
+        for transcript in find_pending(cfg.projects_dir, state):
+            if _expired():
+                summary["deadline_hit"] = True
+                break
+            sid = session_id_for(transcript)
+            if _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
+                continue
+            if not scan_clean(transcript):
+                quarantine_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(transcript, quarantine_dir / transcript.name)
+                state.advance(sid, "quarantined")
+                summary["quarantined"] += 1
+                continue
+            spool_copy(transcript, spool_dir)
+            try:
+                text = extract_text(transcript)
+                learnings = be.complete("distill", "Extract durable learnings.", _distill_prompt(text))
+            except Exception:
+                logging.exception("distill failed for %s", transcript)
+                summary["failed"] += 1
+                continue
+            learnings_dir.mkdir(parents=True, exist_ok=True)
+            artifact = learnings_dir / f"{sid}.md"
+            tmp_artifact = learnings_dir / f"{sid}.tmp"
+            tmp_artifact.write_text(learnings + "\n", encoding="utf-8")
+            if not scan_clean(tmp_artifact):
+                quarantine_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
+                state.advance(sid, "quarantined")
+                summary["quarantined"] += 1
+                continue
+            tmp_artifact.rename(artifact)
+            state.advance(sid, "distilled")
+            summary["distilled"] += 1
 
     if shadow:
         return summary
 
     # ---------- Stage 2: weave (v1) ----------
-    _weave_all(cfg, state, backend, max_targets, today, summary, _expired)
+    _weave_all(cfg, state, backend, max_targets, max_per_target, today, summary, _expired)
     return summary
 
 
-def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: Callable[[], bool]):
+def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, summary,
+               expired: Callable[[], bool]):
     repo = ShadowRepo(cfg.wiki_worktree, base="master")
     ledger = WeaveLedger(cfg.ledger_path)
     ledger.reconcile_from_git(repo.committed_ids())          # git is authoritative
@@ -147,11 +152,15 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: C
             ids_here.append(lid)
             if ledger.status_of(lid) in ("committed", "rejected"):
                 continue
-            route = confirm_route(be, learning, index_listing)
-            if not route:
-                ledger.defer(lid, "unroutable")
-                continue
-            ledger.plan(lid, route["target"], route["action"])
+            cached = ledger.entry(lid)
+            if cached.get("target"):              # routed in a prior run — reuse, no model call
+                route = {"target": cached["target"], "action": cached.get("action", "update")}
+            else:
+                route = confirm_route(be, learning, index_listing)
+                if not route:
+                    ledger.defer(lid, "unroutable")
+                    continue
+                ledger.plan(lid, route["target"], route["action"])
             entry = dict(learning)
             entry.update(id=lid, target=route["target"],
                          directory=route["target"].split("/", 1)[0])
@@ -161,17 +170,24 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: C
 
     targets = list(buckets.keys())
     for target in targets[:max_targets]:
+        # Cap learnings woven into ONE target per run: keeps each weave a small, reviewable
+        # diff and stops a popular pre-existing article from triggering a bisect/cost storm.
+        # The overflow is deferred and drains over subsequent runs.
+        weave_now = buckets[target][:max_per_target]
+        for entry in buckets[target][max_per_target:]:
+            ledger.defer(entry["id"], "per-target cap")
+            summary["deferred"] += 1
         if expired():
             summary["deadline_hit"] = True
-            for entry in buckets[target]:
+            for entry in weave_now:
                 ledger.defer(entry["id"], "run deadline")
                 summary["deferred"] += 1
             continue
         try:
-            res = weave_target(be, repo, ledger, target, dirs[target], buckets[target], today=today)
+            res = weave_target(be, repo, ledger, target, dirs[target], weave_now, today=today)
         except Exception:
             logging.exception("weave_target failed for %s", target)
-            for entry in buckets[target]:
+            for entry in weave_now:
                 ledger.defer(entry["id"], "weave exception")
                 summary["deferred"] += 1
             continue
@@ -180,9 +196,8 @@ def _weave_all(cfg, state, backend_name, max_targets, today, summary, expired: C
         if res["committed"]:
             slug = Path(target).stem
             committed_set = set(res["committed"])
-            first = next((b for b in buckets[target] if b["id"] in committed_set), buckets[target][0])
-            summ = first["learning"][:120]
-            upsert_index_entry(cfg.wiki_worktree, slug, dirs[target], summ, today=today)
+            first = next((b for b in weave_now if b["id"] in committed_set), weave_now[0])
+            upsert_index_entry(cfg.wiki_worktree, slug, dirs[target], first["learning"], today=today)
     for target in targets[max_targets:]:
         for entry in buckets[target]:
             ledger.defer(entry["id"], "per-run cap")

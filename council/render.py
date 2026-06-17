@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .models import Finding, MemberResult, Synthesis
+from .models import Finding, MemberResult, Synthesis, ComparisonResult, SweepReport
 
 _MIN_CONF = {"daily": 8, "deep": 2}
 
@@ -61,6 +61,52 @@ def render_terminal(question: str, syn: Synthesis, results: list[MemberResult],
     # Reuse markdown; terminals render it fine. Strip the <details> wrappers.
     md = render_markdown(question, syn, results, rigor=rigor)
     return md.replace("<details><summary>Raw panel</summary>", "── Raw panel ──").replace("</details>", "")
+
+
+def render_comparison(task: str, res: ComparisonResult) -> str:
+    """Render a `council compare` result: winner + rationale on top, the chair's
+    ranking and grafts, then each panelist's independent vote below."""
+    out = ["## Council — compare", "", f"**Task:** {task}", ""]
+    if res.error:
+        out += [f"_comparison unavailable: {res.error}_", "", "── Raw votes ──", ""]
+    else:
+        out += [f"### Winner: {res.winner}  (confidence {res.confidence}/10)", "",
+                res.rationale, ""]
+        if res.ranking:
+            out += [f"**Ranking:** {' > '.join(res.ranking)}", ""]
+        if res.grafts:
+            out += ["**Graft from the runners-up:**"] + [f"- {g}" for g in res.grafts] + [""]
+        out += ["── Panel votes ──", ""]
+    for v in res.votes:
+        if v.error:
+            out += [f"#### {v.member} · {v.model} — errored", f"_{v.error}_", ""]
+            continue
+        out += [f"#### {v.member} · {v.model} — pick: {v.pick}",
+                f"ranking: {' > '.join(v.ranking)}" if v.ranking else "",
+                f"_{v.rationale}_", ""]
+    return "\n".join(out)
+
+
+def render_sweep(path: str, rep: SweepReport) -> str:
+    """Render a `council sweep` report: chair summary on top, findings worst-first,
+    and an explicit coverage line (scanned / dropped — never a silent cap)."""
+    out = ["## Council — security sweep", "", f"**Target:** {path}", ""]
+    out += [f"### Summary", "", rep.summary, ""]
+    if rep.error:
+        out += [f"_summary error: {rep.error}_", ""]
+    if rep.findings:
+        out += [f"### Findings ({len(rep.findings)})", ""]
+        for f in rep.findings:
+            loc = ", ".join(f.locations)
+            src = ", ".join(f.sources)
+            out.append(f"- `{f.severity}` (c{f.confidence}) {f.point}  "
+                       f"_— {loc} · raised by {src}_")
+        out.append("")
+    else:
+        out += ["_No findings above the confidence gate._", ""]
+    out += [f"---", f"Coverage: scanned {rep.chunks_scanned} file(s); "
+            f"{rep.dropped} eligible file(s) dropped by the chunk cap."]
+    return "\n".join(out)
 
 
 def render_combined(sections, *, rigor: str = "daily") -> str:

@@ -31,3 +31,9 @@ def test_pure_append_is_not_excessive():
 
 def test_new_article_is_not_excessive():
     assert is_excessive_rewrite("", "# New\n\nbody\n") is False
+
+def test_moderate_rewrite_under_relaxed_threshold_is_ok():
+    # 4 of 10 original lines preserved -> 0.6 churn, under the relaxed 0.7 default -> not excessive
+    before = "\n".join(f"line {i}" for i in range(10))
+    after = "\n".join(["line 0", "line 1", "line 2", "line 3"] + [f"new line {i}" for i in range(6)])
+    assert is_excessive_rewrite(before, after) is False

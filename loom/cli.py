@@ -47,10 +47,12 @@ def main(argv=None) -> int:
     a = sub.add_parser("absorb")
     a.add_argument("--live", action="store_true")
     a.add_argument("--max-targets", type=int, default=10)
+    a.add_argument("--max-per-target", type=int, default=4)
     a.add_argument("--deadline-seconds", type=float, default=3600.0)
 
     b = sub.add_parser("backfill")
     b.add_argument("--max-targets", type=int, default=10)
+    b.add_argument("--max-per-target", type=int, default=4)
     b.add_argument("--all", action="store_true")
 
     sub.add_parser("promote")
@@ -63,12 +65,15 @@ def main(argv=None) -> int:
 
     if args.cmd == "absorb":
         summary = absorb(cfg, shadow=not args.live, backend="claude",
-                         max_targets=args.max_targets, today=today,
-                         deadline_seconds=args.deadline_seconds)
+                         max_targets=args.max_targets, max_per_target=args.max_per_target,
+                         today=today, deadline_seconds=args.deadline_seconds)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "backfill":
         cap = 10 ** 9 if args.all else args.max_targets
-        summary = absorb(cfg, shadow=False, backend="venice", max_targets=cap, today=today)
+        # distill=False: backfill weaves the already-distilled backlog on Venice/DIEM only;
+        # it never distills new pending sessions (that's the nightly Claude-backed absorb's job).
+        summary = absorb(cfg, shadow=False, backend="venice", max_targets=cap,
+                         max_per_target=args.max_per_target, today=today, distill=False)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "promote":
         res = promote(wiki_root=cfg.wiki_worktree, claude_root=cfg.claude_dir,
