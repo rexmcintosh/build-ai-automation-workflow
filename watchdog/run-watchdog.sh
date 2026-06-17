@@ -26,12 +26,23 @@ TS="$(date -Iseconds)"
 NOW_HUMAN="$(TZ=Europe/Lisbon date '+%A %Y-%m-%d %H:%M %Z')"
 
 # --- pre-check: collect + triage (no tokens spent here) ---
-OUT="$(WATCHDOG_BASE="$BASE" python3 -m watchdog.run 2>>"$LOG.err")"
+# PYTHONPATH="$BASE" so `python3 -m watchdog.run` resolves the package no matter the
+# cwd (cron runs from $HOME, not the repo root).
+OUT="$(WATCHDOG_BASE="$BASE" PYTHONPATH="$BASE" python3 -m watchdog.run 2>>"$LOG.err")"
 JSON_LINE="$(printf '%s\n' "$OUT" | grep '^WATCHDOG_JSON:' | head -1 | sed 's/^WATCHDOG_JSON://')"
 REPORT="$(printf '%s\n' "$OUT" | grep -v '^WATCHDOG_JSON:')"
-ESCALATE="$(printf '%s' "$JSON_LINE" | python3 -c "import json,sys
+
+# Fail CLOSED: if the pre-check produced no JSON line it crashed (import error, bad
+# signal). A silent watchdog is worse than a noisy one — escalate a meta-alert so the
+# break itself becomes visible, rather than masquerading as "all ok".
+if [ -z "$JSON_LINE" ]; then
+  REPORT="[CRIT] watchdog: pre-check failed to run (no result emitted). See $LOG.err."
+  ESCALATE="1"
+else
+  ESCALATE="$(printf '%s' "$JSON_LINE" | python3 -c "import json,sys
 try: print('1' if json.load(sys.stdin).get('escalate') else '0')
 except Exception: print('0')" 2>/dev/null)"
+fi
 
 if [ "$ESCALATE" != "1" ]; then
   echo "[$TS] rc=0 escalate=0 :: $(printf '%s' "$REPORT" | head -1)" >> "$LOG"
