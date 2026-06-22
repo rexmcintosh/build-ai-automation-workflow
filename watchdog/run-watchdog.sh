@@ -18,6 +18,9 @@ LOG="$LOG_DIR/runs.log"
 CHAT_ID="7735693897"
 MODEL="haiku"
 CLAUDE_BIN="$(command -v claude || echo /usr/bin/claude)"
+# Where the read-only Supabase key lives (for Layer-2 row-count checks). Sourced ONLY
+# for the pre-check subshell below, so the investigator agent never inherits it.
+ENV_FILE="${WATCHDOG_ENV_FILE:-/home/dev/projects/splash_poller/.env}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
@@ -27,10 +30,15 @@ NOW_HUMAN="$(TZ=Europe/Lisbon date '+%A %Y-%m-%d %H:%M %Z')"
 
 # --- pre-check: collect + triage (no tokens spent here) ---
 # PYTHONPATH="$BASE" so `python3 -m watchdog.run` resolves the package no matter the
-# cwd (cron runs from $HOME, not the repo root).
-OUT="$(WATCHDOG_BASE="$BASE" PYTHONPATH="$BASE" python3 -m watchdog.run 2>>"$LOG.err")"
+# cwd (cron runs from $HOME). Secrets sourced in a subshell so they stay out of the
+# agent's environment further down.
+OUT="$( set -a; [ -f "$ENV_FILE" ] && . "$ENV_FILE"; set +a
+        WATCHDOG_BASE="$BASE" PYTHONPATH="$BASE" python3 -m watchdog.run 2>>"$LOG.err" )"
 JSON_LINE="$(printf '%s\n' "$OUT" | grep '^WATCHDOG_JSON:' | head -1 | sed 's/^WATCHDOG_JSON://')"
-REPORT="$(printf '%s\n' "$OUT" | grep -v '^WATCHDOG_JSON:')"
+METRICS_LINE="$(printf '%s\n' "$OUT" | grep '^WATCHDOG_METRICS:' | head -1 | sed 's/^WATCHDOG_METRICS://')"
+# Report excludes the machine lines (JSON + metrics) — the investigator sees only findings.
+REPORT="$(printf '%s\n' "$OUT" | grep -vE '^WATCHDOG_(JSON|METRICS):')"
+[ -n "$METRICS_LINE" ] && echo "[$TS] metrics:$METRICS_LINE" >> "$LOG"
 
 # Fail CLOSED: if the pre-check produced no JSON line it crashed (import error, bad
 # signal). A silent watchdog is worse than a noisy one — escalate a meta-alert so the
