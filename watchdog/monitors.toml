@@ -1,0 +1,44 @@
+# Spike-monitor config — data, not code. Non-secret (the Supabase key comes from env,
+# never here). Thresholds are deliberately generous; calibrate from the metric values the
+# watchdog logs on every poll (see watchdog/logs/runs.log). Missing log files / absent
+# Supabase key are skipped gracefully, so this stays valid on any host.
+
+[settings]
+window_lines = 6   # supervise runs every 5 min; ~6 lines ≈ the 30-min watchdog window
+
+# --- Layer 1: windowed log-counter budgets ---------------------------------
+[[log_counters]]
+name = "supervise.relaunched"
+log  = "/home/dev/projects/splash_poller/logs/supervise.cron.log"
+key  = "relaunched"
+warn = 8
+crit = 20
+
+[[log_counters]]
+name = "supervise.launched"
+log  = "/home/dev/projects/splash_poller/logs/supervise.cron.log"
+key  = "launched"
+warn = 15
+crit = 40
+
+[[log_counters]]
+name = "ingest.ingested"
+log  = "/home/dev/projects/splash_poller/logs/ingest_entries.cron.log"
+key  = "ingested"
+warn = 500
+crit = 5000
+
+# --- Layer 1: live process-count budgets -----------------------------------
+[[processes]]
+name    = "splash.pollers"
+pattern = "poller\\.py"
+warn    = 12
+crit    = 25
+
+# --- Layer 2: Supabase row-growth budgets (rows/hour per table) ------------
+[supabase]
+url           = "https://moaagxigxjyuuqygoqfg.supabase.co"
+key_env       = "SUPABASE_SERVICE_ROLE_KEY"
+warn_per_hour = 20000
+crit_per_hour = 100000
+tables        = ["results", "splits", "swimmers"]
