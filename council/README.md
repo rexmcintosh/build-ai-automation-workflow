@@ -65,6 +65,25 @@ override) to change personas/models or add seats.
 
 The gate is presentation-only — the chair always sees the full set.
 
+## Merge gate (PR review)
+
+`run_pr_review` (used by `setup/templates/venice_review.py`) splits a PR diff into a
+**code** slice (gated) and a **doc** slice (advisory). What blocks a merge is decided
+by `council.gate`, not by any single panelist:
+
+- **Chair-arbitrated + grounded.** Only findings the chair lists in `blocking_findings`
+  block. The chair sees the full contents of the changed files (passed as `file_context`
+  by the shim) and is told to **drop** any finding the code refutes — so "X used before
+  declaration" when X is declared, or "no engines pin" when `package.json` has one, no
+  longer fails the build. A raw panelist finding can no longer gate on its own.
+- **Blast-radius tiered.** `risk_tier` puts production source on the `full` bar
+  (`critical`, or `high` ≥ 8) and developer tooling (`tools/`, `scripts/`, configs) on a
+  `reduced` bar (confident `critical` only). High-risk segments (auth/payment/…) force `full`.
+- **Deterministic + fail-closed.** The shim runs the gate at temperature 0. A genuine
+  chair/panel outage still fails closed; `COUNCIL_ENFORCE=0` makes findings advisory.
+
+See `docs/council-audit-2026-06-25.md` for the failure modes this replaced.
+
 ## Secret
 
 `VENICE_API_KEY` from the environment / `.env`. Never commit it.

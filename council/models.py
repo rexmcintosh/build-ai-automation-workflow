@@ -85,10 +85,20 @@ class ComparisonResult:
 
 
 @dataclass
+class ConfirmedBlock:
+    """A finding the chair has verified against context and judged worth blocking
+    the merge. The gate counts these — not raw panelist findings (see audit F1/F2/F4)."""
+    point: str
+    severity: str = ""
+    why: str = ""
+
+
+@dataclass
 class Synthesis:
     recommendation: str
     confidence: int
     consensus: list[str] = field(default_factory=list)
     disagreements: list[Disagreement] = field(default_factory=list)
     cross_panel_themes: list[str] = field(default_factory=list)
+    blocking_findings: list[ConfirmedBlock] = field(default_factory=list)
     error: str | None = None

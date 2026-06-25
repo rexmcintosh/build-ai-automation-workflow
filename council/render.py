@@ -27,6 +27,13 @@ def render_markdown(question: str, syn: Synthesis, results: list[MemberResult],
                     *, rigor: str = "daily") -> str:
     out = ["## Council", "", f"**Question:** {question}", ""]
     out += [f"### Recommendation (confidence {syn.confidence}/10)", "", syn.recommendation, ""]
+    if syn.blocking_findings:
+        out += [f"### 🚫 Blocking findings ({len(syn.blocking_findings)}) — chair-confirmed, gate the merge", ""]
+        for b in syn.blocking_findings:
+            sev = f"`{b.severity}` " if b.severity else ""
+            why = f" — _{b.why}_" if b.why else ""
+            out.append(f"- {sev}{b.point}{why}")
+        out.append("")
     if syn.consensus:
         out += ["**Consensus:**"] + [f"- {c}" for c in syn.consensus] + [""]
     if syn.cross_panel_themes:
