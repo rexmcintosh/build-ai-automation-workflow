@@ -36,7 +36,8 @@ class Config:
     projects_dir: Path
     loom_dir: Path
     state_path: Path
-    wiki_worktree: Optional[Path] = None
+    wiki_worktree: Optional[Path] = None  # loom-shadow worktree; weave commits land here
+    wiki_master: Optional[Path] = None    # master worktree; promote merges/commits here
     claude_dir: Optional[Path] = None  # claude_dir: used by promote (CLI), not by absorb/weave
     ledger_path: Optional[Path] = None
 

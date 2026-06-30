@@ -35,6 +35,7 @@ def default_config() -> Config:
         loom_dir=_LOOM,
         state_path=_LOOM / "state.json",
         wiki_worktree=_HOME / "wiki-loom-shadow",
+        wiki_master=_HOME / "wiki",
         claude_dir=_HOME / ".claude",
         ledger_path=_LOOM / "weave_ledger.json",
     )
@@ -76,7 +77,8 @@ def main(argv=None) -> int:
                          max_per_target=args.max_per_target, today=today, distill=False)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "promote":
-        res = promote(wiki_root=cfg.wiki_worktree, claude_root=cfg.claude_dir,
+        res = promote(wiki_root=cfg.wiki_master, shadow_root=cfg.wiki_worktree,
+                      claude_root=cfg.claude_dir,
                       backups_dir=cfg.loom_dir / "promote-backups", expect_unmodified=True)
         print(json.dumps(res, cls=_PathEncoder)); return 0
     if args.cmd == "requeue":

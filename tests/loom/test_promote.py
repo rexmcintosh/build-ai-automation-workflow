@@ -89,6 +89,113 @@ def test_promote_update_of_loom_managed_file_succeeds(env):
     assert tgt.read_text() == "an updated preference\n"
 
 
+@pytest.fixture
+def wt_env(tmp_path):
+    """Mirrors the real topology: ~/wiki (master worktree) + ~/wiki-loom-shadow
+    (loom-shadow linked worktree). promote must never `git checkout` either branch,
+    or it hits 'already checked out elsewhere'."""
+    wiki = tmp_path / "wiki"; wiki.mkdir()
+    _git(wiki, "init", "-q", "-b", "master")
+    _git(wiki, "config", "user.email", "t@t"); _git(wiki, "config", "user.name", "t")
+    (wiki / "people").mkdir(); (wiki / "people" / "liam.md").write_text("# Liam\nv0\n")
+    _git(wiki, "add", "-A"); _git(wiki, "commit", "-qm", "seed")
+    shadow = tmp_path / "wiki-loom-shadow"
+    _git(wiki, "worktree", "add", "-q", "-b", "loom-shadow", str(shadow), "master")
+    # weave happens in the shadow worktree
+    (shadow / "people" / "liam.md").write_text("# Liam\nv1 woven\n")
+    staged = shadow / "_staged" / ".claude" / "memory" / "feedback-x.md"
+    staged.parent.mkdir(parents=True); staged.write_text("a new preference\n")
+    _git(shadow, "add", "-A"); _git(shadow, "commit", "-qm", "weave + staged")
+    claude = tmp_path / "claude"; (claude / "memory").mkdir(parents=True)
+    backups = tmp_path / "backups"
+    return {"wiki": wiki, "shadow": shadow, "claude": claude, "backups": backups}
+
+
+def _rev(root, ref):
+    return subprocess.run(["git", "-C", str(root), "rev-parse", ref],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_promote_with_worktrees_applies_and_ffs_shadow(wt_env):
+    e = wt_env
+    promote(wiki_root=e["wiki"], shadow_root=e["shadow"],
+            claude_root=e["claude"], backups_dir=e["backups"])
+    # .claude memory landed
+    assert (e["claude"] / "memory" / "feedback-x.md").read_text() == "a new preference\n"
+    # master advanced with the woven article and carries no _staged/
+    assert (e["wiki"] / "people" / "liam.md").read_text() == "# Liam\nv1 woven\n"
+    assert not (e["wiki"] / "_staged").exists()
+    # loom-shadow fast-forwarded to master (so the next weave starts clean, no _staged)
+    assert _rev(e["wiki"], "master") == _rev(e["wiki"], "loom-shadow")
+    assert not (e["shadow"] / "_staged").exists()
+
+
+def test_promote_rejects_foreign_shadow_root(wt_env, tmp_path):
+    """A valid git repo that is NOT a worktree of wiki_root must be rejected before any
+    mutation — otherwise the ff silently advances a foreign branch and the real
+    loom-shadow goes stale."""
+    e = wt_env
+    before = _rev(e["wiki"], "master")
+    foreign = tmp_path / "foreign"; foreign.mkdir()
+    _git(foreign, "init", "-q", "-b", "loom-shadow")
+    _git(foreign, "config", "user.email", "t@t"); _git(foreign, "config", "user.name", "t")
+    (foreign / "x").write_text("x\n"); _git(foreign, "add", "-A"); _git(foreign, "commit", "-qm", "x")
+    with pytest.raises(PromoteError):
+        promote(wiki_root=e["wiki"], shadow_root=foreign,
+                claude_root=e["claude"], backups_dir=e["backups"])
+    assert not (e["claude"] / "memory" / "feedback-x.md").exists()
+    assert _rev(e["wiki"], "master") == before
+
+
+def test_promote_rejects_shadow_not_on_loom_shadow(wt_env):
+    e = wt_env
+    before = _rev(e["wiki"], "master")
+    _git(e["shadow"], "checkout", "-q", "-b", "wrongbranch")
+    with pytest.raises(PromoteError):
+        promote(wiki_root=e["wiki"], shadow_root=e["shadow"],
+                claude_root=e["claude"], backups_dir=e["backups"])
+    assert not (e["claude"] / "memory" / "feedback-x.md").exists()
+    assert _rev(e["wiki"], "master") == before
+
+
+def test_promote_rejects_dirty_shadow(wt_env):
+    e = wt_env
+    before = _rev(e["wiki"], "master")
+    (e["shadow"] / "people" / "liam.md").write_text("uncommitted edit\n")
+    with pytest.raises(PromoteError):
+        promote(wiki_root=e["wiki"], shadow_root=e["shadow"],
+                claude_root=e["claude"], backups_dir=e["backups"])
+    assert not (e["claude"] / "memory" / "feedback-x.md").exists()
+    assert _rev(e["wiki"], "master") == before
+
+
+def test_promote_post_mutation_failure_rolls_back(wt_env, monkeypatch):
+    """A failure AFTER the .claude swap and the master merge+rm (here: the final shadow
+    fast-forward) must roll back the swap, reset master to its pre-promote HEAD, and leave
+    the master working tree clean (no half-merge, no leftover staged-removal)."""
+    import loom.promote as P
+    e = wt_env
+    before = _rev(e["wiki"], "master")
+    real_git = P._git
+
+    def flaky_git(root, *args, check=True):
+        if args[:2] == ("merge", "--ff-only"):     # the very last step, post-mutation
+            raise P.PromoteError("simulated fast-forward failure")
+        return real_git(root, *args, check=check)
+    monkeypatch.setattr(P, "_git", flaky_git)
+
+    with pytest.raises(PromoteError):
+        promote(wiki_root=e["wiki"], shadow_root=e["shadow"],
+                claude_root=e["claude"], backups_dir=e["backups"])
+    # newly-created .claude target removed, master back where it was
+    assert not (e["claude"] / "memory" / "feedback-x.md").exists()
+    assert _rev(e["wiki"], "master") == before
+    # master working tree clean — no in-progress merge, no orphaned files
+    porcelain = subprocess.run(["git", "-C", str(e["wiki"]), "status", "--porcelain"],
+                               capture_output=True, text=True).stdout.strip()
+    assert porcelain == ""
+
+
 def test_promote_refuses_out_of_band_edit(env):
     promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
     tgt = env["claude"] / "memory" / "feedback-x.md"
