@@ -10,13 +10,14 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 council = "council.cli:main"
+diem = "diem.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["council"]
+packages = ["council", "diem"]
 
 [tool.setuptools.package-data]
 council = ["panels.toml"]
