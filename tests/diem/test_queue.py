@@ -58,3 +58,10 @@ def test_archive_and_remove(tmp_path):
     it2 = new_item("ask", {"question": "q2", "panel": "decision"}, created=NOW)
     q.add(it2)
     assert q.remove(it2.id) and q.pending(NOW) == []
+
+def test_night_helpers_tolerate_non_dict_json(tmp_path):
+    q = _q(tmp_path)
+    (q.qdir / "junk.json").write_text("null")
+    (q.adir / "junk2.json").write_text('"just a string"')
+    assert q.night_count("ask", "2026-07-01T00:00:00") == 0
+    assert q.archived_keys_since("2026-07-01T00:00:00") == set()

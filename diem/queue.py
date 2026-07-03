@@ -103,7 +103,9 @@ class QueueDir:
             for f in d.glob("*.json"):
                 try:
                     rec = json.loads(f.read_text())
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(rec, dict):
                     continue
                 if rec.get("type") == type_ and rec.get("created", "") >= since_iso:
                     n += 1
@@ -114,9 +116,14 @@ class QueueDir:
         for f in self.adir.glob("*.json"):
             try:
                 rec = json.loads(f.read_text())
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            try:
                 rec.pop("outcome", None)
                 item = Item(**rec)
-            except (json.JSONDecodeError, TypeError):
+            except TypeError:
                 continue
             if item.created >= since_iso:
                 keys.add(item.dedupe_key())
