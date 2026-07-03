@@ -85,3 +85,9 @@ def test_load_venice_key_missing_exits(tmp_path):
     env.write_text("OTHER=x\n")
     with pytest.raises(SystemExit):
         load_venice_key(env)
+
+def test_partial_seed_override_keeps_default_fields(tmp_path):
+    p = tmp_path / "s.toml"
+    p.write_text('daily_diem = 1.0\nrepos = []\n[seeds.images]\ncost = 5.0\n')
+    cfg = DiemConfig.load(p)
+    assert cfg.seeds["images"] == {"cost": 5.0, "duration_s": 180}

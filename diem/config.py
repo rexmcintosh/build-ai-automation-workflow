@@ -70,8 +70,9 @@ class DiemConfig:
                 kw[key] = Path(raw[key])
         if "loom_cmd" in raw:
             kw["loom_cmd"] = list(raw["loom_cmd"])
-        seeds = dict(_DEFAULT_SEEDS)
-        seeds.update(raw.get("seeds", {}))
+        seeds = {k: dict(v) for k, v in _DEFAULT_SEEDS.items()}
+        for k, v in raw.get("seeds", {}).items():
+            seeds[k] = {**seeds.get(k, {}), **v}
         kw["seeds"] = seeds
         kw["telegram"] = raw.get("telegram")
         kw["cmd_whitelist"] = raw.get("cmd_whitelist", {})
