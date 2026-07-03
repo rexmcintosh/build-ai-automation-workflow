@@ -291,7 +291,7 @@ git commit -m "feat(diem): package scaffold, config + Venice key loading"
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
-- Produces: `Item` dataclass (`id, type, banked, priority, payload, created, expires, attempts, max_attempts`) with `.dedupe_key() -> str`, `.to_json() -> str`, classmethod `Item.from_json(text)`. `new_item(type: str, payload: dict, *, banked=False, expires=None, created: str) -> Item` (caller supplies `created` ISO string — keeps clock injectable). `QueueDir(root: Path)` with `.add(item) -> bool` (False + no write on duplicate `dedupe_key` among pending), `.pending(now_iso: str) -> list[Item]` (expired items auto-archived, result sorted banked-first then type priority `ask=0, images=1, review=2, cmd=2, backfill=3`, then `created`), `.archive(item, outcome: dict)`, `.remove(item_id) -> bool`, `.night_count(type_) -> int` (pending+archived tonight, for caps).
+- Produces: `Item` dataclass (`id, type, banked, priority, payload, created, expires, attempts, max_attempts`) with `.dedupe_key() -> str`, `.to_json() -> str`, classmethod `Item.from_json(text)`. `new_item(type: str, payload: dict, *, banked=False, expires=None, created: str) -> Item` (caller supplies `created` ISO string — keeps clock injectable). `QueueDir(root: Path)` with `.add(item) -> bool` (False + no write on duplicate `dedupe_key` among pending), `.pending(now_iso: str) -> list[Item]` (expired items auto-archived, result sorted banked-first then type priority `ask=0, images=1, review=2, cmd=2, backfill=3`, then `created`), `.archive(item, outcome: dict)`, `.remove(item_id) -> bool`, `.requeue(item)` (rewrite a pending item file, e.g. after `attempts += 1`), `.night_count(type_, since_iso: str) -> int` (pending + archived items with `created >= since_iso`, for per-night caps), `.archived_keys_since(since_iso: str) -> set[str]` (dedupe keys of items archived with `created >= since_iso` — lets discovery enforce "once per night" past archive time).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -332,7 +332,21 @@ def test_expired_items_are_archived_not_returned(tmp_path):
     q.add(new_item("ask", {"question": "old", "panel": "decision"},
                    created="2026-07-01T10:00:00", expires="2026-07-02T00:00:00"))
     assert q.pending(NOW) == []
-    assert q.night_count("ask") == 1  # archived, still counted
+    assert q.night_count("ask", "2026-07-01T00:00:00") == 1  # archived, still counted
+    assert q.night_count("ask", "2026-07-03T01:00:00") == 0  # outside window
+
+def test_archived_keys_since_and_requeue(tmp_path):
+    q = _q(tmp_path)
+    it = new_item("review", {"repo": "/r/a", "diff": True}, created=NOW)
+    q.add(it)
+    q.archive(it, {"ok": True})
+    assert it.dedupe_key() in q.archived_keys_since("2026-07-03T01:00:00")
+    assert q.archived_keys_since("2026-07-04T01:00:00") == set()
+    it2 = new_item("ask", {"question": "q", "panel": "decision"}, created=NOW)
+    q.add(it2)
+    it2.attempts = 1
+    q.requeue(it2)
+    assert q.pending(NOW)[0].attempts == 1
 
 def test_archive_and_remove(tmp_path):
     q = _q(tmp_path)
@@ -450,22 +464,39 @@ class QueueDir:
             return True
         return False
 
-    def night_count(self, type_: str) -> int:
+    def requeue(self, item: Item) -> None:
+        (self.qdir / f"{item.id}.json").write_text(item.to_json())
+
+    def night_count(self, type_: str, since_iso: str) -> int:
         n = 0
         for d in (self.qdir, self.adir):
             for f in d.glob("*.json"):
                 try:
-                    if json.loads(f.read_text()).get("type") == type_:
-                        n += 1
+                    rec = json.loads(f.read_text())
                 except json.JSONDecodeError:
                     continue
+                if rec.get("type") == type_ and rec.get("created", "") >= since_iso:
+                    n += 1
         return n
+
+    def archived_keys_since(self, since_iso: str) -> set[str]:
+        keys = set()
+        for f in self.adir.glob("*.json"):
+            try:
+                rec = json.loads(f.read_text())
+                rec.pop("outcome", None)
+                item = Item(**rec)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if item.created >= since_iso:
+                keys.add(item.dedupe_key())
+        return keys
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/diem/test_queue.py -v`
-Expected: 5 PASS
+Expected: 6 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -783,7 +814,7 @@ git commit -m "feat(diem): estimates EMA, reviewed SHAs, pid lock, pause marker"
 
 **Interfaces:**
 - Consumes: `DiemConfig` (Task 1: `.repos`), `QueueDir`/`new_item` (Task 2), `Reviewed` (Task 4).
-- Produces: `discover(cfg, queue, reviewed, now_iso, *, run=subprocess.run) -> list[Item]` — returns the items it actually added (post-dedupe). Behavior:
+- Produces: `discover(cfg, queue, reviewed, now_iso, *, day_start_iso: str | None = None, run=subprocess.run) -> list[Item]` — returns the items it actually added (post-dedupe). When `day_start_iso` is given, items whose dedupe key appears in `queue.archived_keys_since(day_start_iso)` are NOT re-added — this is what enforces spec §4's "one review per repo per night" after the first checkpoint has already run and archived a review. Behavior:
   - Per repo: `git rev-parse HEAD` on the default branch. First sighting → record SHA in `reviewed`, queue nothing (baseline). SHA moved → queue `review` item `{"repo", "range": "<old>..<new>", "head": "<new>"}`. Dirty tree (`git status --porcelain` non-empty) → queue `review` item `{"repo", "diff": true}`.
   - Per repo: if `<repo>/.diem/standing-order.json` exists — schema `{"target": int, "candidates_dir": str (repo-relative), "command": [argv...]}` — count plain files in candidates_dir; shortfall > 0 → queue `images` item `{"repo", "count": shortfall, "command": [...]}`. Missing/malformed standing order → skip silently (spec: the drain never invents creative direction).
   - Git failures on a repo → skip that repo, never raise.
@@ -872,6 +903,21 @@ def test_broken_repo_skipped(tmp_path):
     notrepo = tmp_path / "plain"; notrepo.mkdir()
     q, rev = _bits(tmp_path)
     assert discover(_cfg(tmp_path, [notrepo]), q, rev, NOW) == []
+
+def test_archived_tonight_not_rediscovered(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)          # baseline
+    (repo / "x.py").write_text("x = 1\n")
+    day = "2026-07-03T01:00:00"
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day)
+    assert len(added) == 1
+    q.archive(added[0], {"ok": True})                       # ran at 21:00 checkpoint
+    # tree still dirty at the 23:00 checkpoint — must NOT re-queue tonight
+    assert discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day) == []
+    # next DIEM day: eligible again
+    assert len(discover(_cfg(tmp_path, [repo]), q, rev,
+                        "2026-07-04T21:00:00", day_start_iso="2026-07-04T01:00:00")) == 1
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -907,10 +953,15 @@ def _git(repo: Path, *args, run) -> str | None:
 
 
 def discover(cfg, queue: QueueDir, reviewed: Reviewed, now_iso: str,
-             *, run=subprocess.run) -> list[Item]:
+             *, day_start_iso: str | None = None,
+             run=subprocess.run) -> list[Item]:
     added: list[Item] = []
+    done_tonight = (queue.archived_keys_since(day_start_iso)
+                    if day_start_iso else set())
 
     def _add(item: Item):
+        if item.dedupe_key() in done_tonight:
+            return  # already ran (or failed out) tonight — once per night
         if queue.add(item):
             added.append(item)
 
@@ -950,7 +1001,7 @@ def discover(cfg, queue: QueueDir, reviewed: Reviewed, now_iso: str,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/diem/test_discover.py -v`
-Expected: 6 PASS
+Expected: 7 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -1216,8 +1267,8 @@ git commit -m "feat(diem): subprocess runners with deadline backstop"
 1. Lock or return `{"aborted": "locked"}`. Pause active (`pause_until` > now) → `{"aborted": "paused"}`.
 2. `discover(...)` first (queue tops up), then loop:
 3. Read balance. `BalanceUnavailable` → abort with `"aborted": "balance_unavailable"` (never drain blind). Balance ≤ floor → stop normally.
-4. Walk `queue.pending()` in order; pick the first item where `bal - est_cost >= floor` AND `now + est_duration <= deadline`. Items that don't fit are recorded in `skipped` (reason `budget` or `deadline`) but stay queued.
-5. Nothing fits but budget remains and `queue.night_count("backfill") < cfg.backfill_max_per_night` → enqueue a filler `backfill` item (chunk `cfg.backfill_chunk`) and continue; else stop.
+4. Walk `queue.pending()` in order; pick the first item where `bal - est_cost >= floor` AND `now + est_duration <= deadline`, **skipping any item already attempted this checkpoint** (a failed-and-requeued item retries at the NEXT checkpoint, not in the same loop). Items that don't fit are recorded in `skipped` (reason `budget` or `deadline`) but stay queued.
+5. Filler top-up ONLY when the pending queue is completely empty (never when items exist but don't fit — a deadline-skipped review must not spawn backfill noise): if `queue.night_count("backfill", day_start_iso) < cfg.backfill_max_per_night`, enqueue a filler `backfill` item (chunk `cfg.backfill_chunk`) and continue the loop (it gets picked through the normal budget/deadline gate); else stop. `day_start_iso = (next_reset(cfg, now) - 1 day).isoformat()` — also passed to `discover(...)` as `day_start_iso` so per-night dedupe holds across checkpoints.
 6. Run item. Re-read balance; `cost = max(0.0, before - after)`. `estimates.record(type, cost, duration)`. Success → archive `{"ok": True, ...}`; review-range success also `reviewed.set(repo, head)`. Failure → `attempts += 1`; re-queue (rewrite file) if `attempts < max_attempts`, else archive `{"ok": False, "error": ...}`.
 7. Loop until floor/deadline/queue-exhausted. Always release lock (try/finally).
 
@@ -1273,6 +1324,8 @@ def test_floor_for_picks_latest_checkpoint():
     assert floor_for(cfg, datetime(2026, 7, 3, 23, 5)) == 15.0
     assert floor_for(cfg, datetime(2026, 7, 4, 0, 20)) == 0.0
     assert floor_for(cfg, datetime(2026, 7, 3, 20, 0)) == 40.0  # pre-first: conservative
+    # after midnight but before 00:15, last-fired checkpoint is yesterday 23:00
+    assert floor_for(cfg, datetime(2026, 7, 4, 0, 5)) == 15.0
 
 def test_next_deadline_before_and_after_midnight():
     cfg = _cfg(Path("/tmp/x"))
@@ -1359,7 +1412,7 @@ def test_filler_backfill_tops_up_empty_queue(tmp_path):
                    queue=q, estimates=est, reviewed=rev, runner=r)
     assert 1 <= len(r.ran) <= 2
     assert all(i.type == "backfill" and i.payload["max_targets"] == 3 for i in r.ran)
-    assert q.night_count("backfill") <= 2  # cap respected
+    assert q.night_count("backfill", "2026-07-03T01:00:00") <= 2  # cap respected
 
 def test_estimates_recorded_from_balance_delta(tmp_path):
     cfg = _cfg(tmp_path)
@@ -1410,11 +1463,14 @@ def next_reset(cfg, now: datetime) -> datetime:
 
 def floor_for(cfg, now: datetime) -> float:
     """Latest checkpoint at-or-before now on the DIEM day (reset..reset).
+    Checkpoint times are anchored to the DAY START, not now's date — at
+    00:05 the operative checkpoint is *yesterday's* 23:00, and a 00:15
+    checkpoint belongs to the day that started the previous 01:00.
     Before the first checkpoint fires, use the first (most conservative)."""
     day_start = next_reset(cfg, now) - timedelta(days=1)
     best = None
     for cp in cfg.checkpoints:
-        t = _at(now, cp.time)
+        t = _at(day_start, cp.time)
         if t < day_start:
             t += timedelta(days=1)
         if t <= now and (best is None or t > best[0]):
@@ -1442,8 +1498,12 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
         summary["aborted"] = "locked"
         return summary
     try:
-        discover(cfg, queue, reviewed, now_iso, run=run)
-        elapsed = 0.0  # simulated wall-clock from job durations (tests inject now)
+        day_start_iso = (next_reset(cfg, now) - timedelta(days=1)) \
+            .isoformat(timespec="seconds")
+        discover(cfg, queue, reviewed, now_iso, day_start_iso=day_start_iso,
+                 run=run)
+        elapsed = 0.0    # simulated wall-clock from job durations (tests inject now)
+        attempted = set()  # ids run this checkpoint — failures retry NEXT checkpoint
         while True:
             try:
                 bal = balance.diem_balance()
@@ -1457,8 +1517,11 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
                 return summary
 
             eff_now = now + timedelta(seconds=elapsed)
+            pend = queue.pending(now_iso)
             picked, skipped_this_pass = None, []
-            for it in queue.pending(now_iso):
+            for it in pend:
+                if it.id in attempted:
+                    continue
                 cost, dur = estimates.estimate(it.type)
                 if bal - cost < floor:
                     skipped_this_pass.append({"id": it.id, "type": it.type,
@@ -1472,17 +1535,17 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
             summary["skipped"].extend(skipped_this_pass)
 
             if picked is None:
-                if queue.night_count("backfill") < cfg.backfill_max_per_night:
-                    filler = new_item("backfill",
-                                      {"max_targets": cfg.backfill_chunk},
-                                      created=now_iso)
-                    _, fdur = estimates.estimate("backfill")
-                    if (queue.add(filler)
-                            and eff_now + timedelta(seconds=fdur) <= deadline):
-                        continue
-                    queue.remove(filler.id)  # couldn't fit it either
+                # Filler ONLY on a truly empty queue — items that merely don't
+                # fit (budget/deadline) must not spawn backfill noise.
+                if (not pend and queue.night_count("backfill", day_start_iso)
+                        < cfg.backfill_max_per_night):
+                    queue.add(new_item("backfill",
+                                       {"max_targets": cfg.backfill_chunk},
+                                       created=now_iso))
+                    continue  # picked up through the normal budget/deadline gate
                 return summary
 
+            attempted.add(picked.id)
             deadline_epoch = (deadline - eff_now).total_seconds()
             res = runner(picked, deadline_epoch=deadline_epoch)
             elapsed += res.duration_s
@@ -1503,9 +1566,8 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
                     reviewed.set(picked.payload["repo"], picked.payload["head"])
             else:
                 picked.attempts += 1
-                queue.remove(picked.id)
                 if picked.attempts < picked.max_attempts:
-                    (queue.qdir / f"{picked.id}.json").write_text(picked.to_json())
+                    queue.requeue(picked)
                 else:
                     queue.archive(picked, {"ok": False, "error": res.error})
     finally:
