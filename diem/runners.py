@@ -73,9 +73,13 @@ def run_item(item, cfg, env: dict, *, deadline_epoch: float,
                 try:
                     so_data = json.loads(standing_order_path.read_text())
                     command = so_data.get("command")
-                except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                except (FileNotFoundError, json.JSONDecodeError, KeyError,
+                        AttributeError, TypeError):
                     return RunResult(False, clock() - start,
                                      error="images item has no command and no standing order")
+            if not isinstance(command, list) or not command:
+                return RunResult(False, clock() - start,
+                                 error="images item has no command and no standing order")
             argv = list(command) + ["--count", str(p["count"])]
             proc = _exec(argv, cwd=p["repo"])
             return _done(proc, Path(cfg.outputs_dir) / "logs" / f"{item.id}.log", True)

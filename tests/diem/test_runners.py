@@ -113,3 +113,23 @@ def test_images_falls_back_to_standing_order(tmp_path):
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=fr, clock=lambda: 0.0)
     assert res.ok and fr.calls[0]["argv"] == ["python", "so.py", "--count", "2"]
+
+def test_images_no_command_no_standing_order_fails_cleanly(tmp_path):
+    it = new_item("images", {"repo": str(tmp_path / "nowhere"), "count": 2}, created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=FakeRun(), clock=lambda: 0.0)
+    assert not res.ok and res.error == "images item has no command and no standing order"
+
+def test_images_standing_order_without_command_fails_cleanly(tmp_path):
+    repo = tmp_path / "re"; (repo / ".diem").mkdir(parents=True)
+    (repo / ".diem" / "standing-order.json").write_text('{"target": 9}')
+    it = new_item("images", {"repo": str(repo), "count": 2}, created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=FakeRun(), clock=lambda: 0.0)
+    assert not res.ok and res.error == "images item has no command and no standing order"
+
+def test_images_string_command_rejected(tmp_path):
+    it = new_item("images", {"repo": "/r", "count": 2, "command": "python x.py"}, created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=FakeRun(), clock=lambda: 0.0)
+    assert not res.ok and "no command" in res.error
