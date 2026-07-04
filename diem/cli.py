@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .balance import BalanceClient
+from .balance import BalanceClient, BalanceUnavailable
 from .config import DiemConfig, load_venice_key
 from .drain import floor_for, next_deadline, next_reset, run_checkpoint
 from .queue import QueueDir, new_item
@@ -57,12 +58,15 @@ def _cmd_drain(cfg, now: datetime) -> int:
     last_cp = max(cfg.checkpoints,
                   key=lambda c: (c.time < cfg.reset, c.time))  # 00:15 sorts last
     if now.strftime("%H:%M") >= last_cp.time and now.strftime("%H:%M") < cfg.reset:
-        summaries = [json.loads(l) for l in jl.read_text().splitlines() if l.strip()]
-        path = write_morning_report(cfg, day, summaries)
-        ran = sum(len(s.get("ran", [])) for s in summaries)
-        failed = sum(1 for s in summaries for r in s.get("ran", []) if not r["ok"])
-        send_telegram(cfg, f"DIEM night done: {ran} job(s), {failed} failed.\n"
-                           f"Report: {path}")
+        try:
+            summaries = [json.loads(l) for l in jl.read_text().splitlines() if l.strip()]
+            path = write_morning_report(cfg, day, summaries)
+            ran = sum(len(s.get("ran", [])) for s in summaries)
+            failed = sum(1 for s in summaries for r in s.get("ran", []) if not r["ok"])
+            send_telegram(cfg, f"DIEM night done: {ran} job(s), {failed} failed.\n"
+                               f"Report: {path}")
+        except Exception as e:  # noqa: BLE001 — reporting failures must never crash the drain
+            print(f"warning: morning report failed: {e}", file=sys.stderr)
     print(json.dumps(summary, indent=1))
     return 0
 
@@ -74,6 +78,8 @@ def _cmd_status(cfg, now: datetime) -> int:
         pct = f"{100 * bal / cfg.daily_diem:.0f}%"
     except SystemExit:
         bal, pct = None, "? (no key)"
+    except BalanceUnavailable:
+        bal, pct = None, "? (unavailable)"
     pend = q.pending(now.isoformat(timespec="seconds"))
     banked = sum(1 for i in pend if i.banked)
     print(f"balance:  {bal} ({pct} of {cfg.daily_diem})")
@@ -148,7 +154,7 @@ def main(argv=None) -> int:
         if args.qcmd == "rm":
             return 0 if q.remove(args.id) else 1
     if args.cmd == "pause":
-        until = (now + timedelta(hours=args.hours)) if args.hours \
+        until = (now + timedelta(hours=args.hours)) if args.hours is not None \
             else next_reset(cfg, now)
         set_pause(cfg.state_dir, until.isoformat(timespec="seconds"))
         print(f"paused until {until}")
