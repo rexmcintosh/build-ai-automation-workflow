@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from diem.state import Estimates, Reviewed, Lock, pause_until, set_pause, clear_pause
 
 SEEDS = {"images": {"cost": 2.0, "duration_s": 180}}
@@ -38,3 +39,15 @@ def test_pause_roundtrip(tmp_path):
     assert pause_until(tmp_path) == "2026-07-04T01:00:00"
     clear_pause(tmp_path)
     assert pause_until(tmp_path) is None
+
+def test_lock_acquire_survives_vanishing_lockfile(tmp_path, monkeypatch):
+    lock = Lock(tmp_path / "l")
+    real_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: True if self == lock.path else real_exists(self))
+    assert lock.acquire()  # file "exists" but read finds nothing — must not raise
+
+def test_atomic_write_leaves_no_tmp_and_persists(tmp_path):
+    r = Reviewed(tmp_path / "reviewed.json")
+    r.set("/r/a", "abc")
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert Reviewed(tmp_path / "reviewed.json").get("/r/a") == "abc"

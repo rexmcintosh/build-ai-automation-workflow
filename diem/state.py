@@ -7,6 +7,13 @@ _ALPHA = 0.3
 _FALLBACK = (1.0, 300.0)
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 class Estimates:
     def __init__(self, path: Path, seeds: dict):
         self.path = Path(path)
@@ -31,8 +38,7 @@ class Estimates:
             "cost": prev_cost + _ALPHA * (cost - prev_cost),
             "duration_s": prev_dur + _ALPHA * (duration_s - prev_dur),
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=1))
+        _atomic_write(self.path, json.dumps(self.data, indent=1))
 
 
 class Reviewed:
@@ -48,8 +54,7 @@ class Reviewed:
 
     def set(self, repo: str, sha: str) -> None:
         self.data[repo] = sha
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=1))
+        _atomic_write(self.path, json.dumps(self.data, indent=1))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -70,7 +75,7 @@ class Lock:
         if self.path.exists():
             try:
                 pid = int(self.path.read_text().strip())
-            except ValueError:
+            except (OSError, ValueError):
                 pid = -1
             if pid > 0 and _pid_alive(pid):
                 return False
@@ -99,9 +104,7 @@ def pause_until(state_dir: Path) -> str | None:
 
 
 def set_pause(state_dir: Path, until_iso: str) -> None:
-    p = _pause_path(state_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(until_iso)
+    _atomic_write(_pause_path(state_dir), until_iso)
 
 
 def clear_pause(state_dir: Path) -> None:
