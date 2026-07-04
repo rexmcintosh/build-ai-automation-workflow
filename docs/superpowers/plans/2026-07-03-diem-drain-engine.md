@@ -2084,6 +2084,20 @@ Then `pipx reinstall council` once more from merged main.
 
 ---
 
+## Amendment 2026-07-04 (post Task-7 review — Opus reviewer finding)
+
+The reference `next_deadline` returned the *next occurrence* of 00:50, so a
+checkpoint firing in the (00:50, 01:00) gap — or after the reset — saw a
+deadline ~24h out at floor 0 and could drain the NEXT day's budget unattended.
+Shipped fix (drain.py): `next_deadline` is anchored to the current DIEM day
+(`_at(next_reset(cfg, now), cfg.deadline)`, may legitimately be in the past);
+`run_checkpoint` aborts with `"past_deadline"` when `now > deadline` and with
+`"no_checkpoint_fired"` when no checkpoint of the current DIEM day has fired
+yet (kills post-reset and mid-day off-schedule drains; scheduled 21:00/23:00/
+00:15 runs are unaffected). Also: `skipped` entries deduped by item id.
+Config contract noted: `deadline` must fall between the last checkpoint and
+`reset` on the clock (00:50 < 01:00).
+
 ## Self-Review Notes (already applied)
 
 - **Spec coverage check:** spec §2 config/state ↔ T1/T4; §3 queue ↔ T2; §4 discovery ↔ T5; §5 scheduling ↔ T7; §6 safety ↔ T6 (whitelist, no publish verbs anywhere) — *except* image content-violation quarantine (spec §6): the standing-order pipeline owns its own staging, and its command is the only thing that sees Venice image headers, so quarantine lives in the pipeline, not diem. This is a deliberate boundary call consistent with "diem never implements workloads"; noted here so the reviewer sees it. §7 reporting ↔ T8/T9; §8 errors ↔ T6/T7 (429 backoff is council's own retry layer — diem does not duplicate it; requeue-once covers the rest); §9 rollout ↔ T10.
