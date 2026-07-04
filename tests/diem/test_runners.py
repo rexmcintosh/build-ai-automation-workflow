@@ -133,3 +133,11 @@ def test_images_string_command_rejected(tmp_path):
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=FakeRun(), clock=lambda: 0.0)
     assert not res.ok and "no command" in res.error
+
+def test_images_non_dict_standing_order_fails_cleanly(tmp_path):
+    repo = tmp_path / "re"; (repo / ".diem").mkdir(parents=True)
+    (repo / ".diem" / "standing-order.json").write_text('["not", "a", "dict"]')
+    it = new_item("images", {"repo": str(repo), "count": 2}, created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=FakeRun(), clock=lambda: 0.0)
+    assert not res.ok and res.error == "images item has no command and no standing order"
