@@ -73,14 +73,17 @@ def discover(cfg, queue: QueueDir, reviewed: Reviewed, now_iso: str,
                 cand_dir = so["candidates_dir"]
                 if Path(cand_dir).is_absolute():
                     raise ValueError("candidates_dir must be relative to the repo")
+                # Validate the command here too — even though it is never
+                # embedded in the payload (the runner re-reads the standing
+                # order at run time) — so a doomed item never enqueues.
+                if not (isinstance(so["command"], list) and so["command"]):
+                    raise ValueError("command must be a non-empty list")
                 cand = repo / cand_dir
-                command = list(so["command"])
                 stock = (sum(1 for f in cand.glob("*") if f.is_file())
                          if cand.is_dir() else 0)
                 if stock < target:
                     _add(new_item("images", {"repo": repo_key,
-                                             "count": target - stock,
-                                             "command": command}, created=now_iso))
+                                             "count": target - stock}, created=now_iso))
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             continue  # malformed/unreadable standing order: skip, never invent
     return added

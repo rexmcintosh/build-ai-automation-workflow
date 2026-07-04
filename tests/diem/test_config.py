@@ -91,3 +91,41 @@ def test_partial_seed_override_keeps_default_fields(tmp_path):
     p.write_text('daily_diem = 1.0\nrepos = []\n[seeds.images]\ncost = 5.0\n')
     cfg = DiemConfig.load(p)
     assert cfg.seeds["images"] == {"cost": 5.0, "duration_s": 180}
+
+def test_tilde_expanded_in_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = tmp_path / "cfg.toml"
+    p.write_text(
+        'daily_diem = 10.0\n'
+        'repos = ["~/projects/foo"]\n'
+        'state_dir = "~/state"\n'
+        'outputs_dir = "~/out"\n'
+        'loom_repo = "~/loom"\n'
+    )
+    cfg = DiemConfig.load(p)
+    assert cfg.repos == [tmp_path / "projects/foo"]
+    assert cfg.state_dir == tmp_path / "state"
+    assert cfg.outputs_dir == tmp_path / "out"
+    assert cfg.loom_repo == tmp_path / "loom"
+
+def test_empty_checkpoints_exits_2(tmp_path):
+    p = tmp_path / "bad.toml"
+    p.write_text('daily_diem = 1.0\nrepos = []\ncheckpoints = []\n')
+    with pytest.raises(SystemExit) as exc:
+        DiemConfig.load(p)
+    assert exc.value.code == 2
+
+def test_deadline_not_before_reset_exits_2(tmp_path):
+    p = tmp_path / "bad.toml"
+    p.write_text('daily_diem = 1.0\nrepos = []\ndeadline = "01:30"\nreset = "01:00"\n')
+    with pytest.raises(SystemExit) as exc:
+        DiemConfig.load(p)
+    assert exc.value.code == 2
+
+@pytest.mark.parametrize("bad_time", ["25:00", "10:60", "notatime", "1", "1:2:3"])
+def test_bad_time_string_exits_2(tmp_path, bad_time):
+    p = tmp_path / "bad.toml"
+    p.write_text(f'daily_diem = 1.0\nrepos = []\ndeadline = "{bad_time}"\n')
+    with pytest.raises(SystemExit) as exc:
+        DiemConfig.load(p)
+    assert exc.value.code == 2

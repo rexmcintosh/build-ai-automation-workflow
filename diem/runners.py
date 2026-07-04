@@ -66,17 +66,18 @@ def run_item(item, cfg, env: dict, *, deadline_epoch: float,
             return _done(proc, out, True)
 
         if item.type == "images":
-            command = p.get("command")
-            if not command:
-                # Fall back to standing-order.json
-                standing_order_path = Path(p["repo"]) / ".diem" / "standing-order.json"
-                try:
-                    so_data = json.loads(standing_order_path.read_text())
-                    command = so_data.get("command")
-                except (FileNotFoundError, json.JSONDecodeError, KeyError,
-                        AttributeError, TypeError):
-                    return RunResult(False, clock() - start,
-                                     error="images item has no command and no standing order")
+            # Command provenance: SOLELY the target repo's standing order at
+            # run time. A payload-supplied command is never honored — a
+            # queue-dir writer could otherwise smuggle argv past the
+            # advertised whitelist/standing-order gate.
+            standing_order_path = Path(p["repo"]) / ".diem" / "standing-order.json"
+            try:
+                so_data = json.loads(standing_order_path.read_text())
+                command = so_data.get("command")
+            except (FileNotFoundError, json.JSONDecodeError, KeyError,
+                    AttributeError, TypeError):
+                return RunResult(False, clock() - start,
+                                 error="images item has no command and no standing order")
             if not isinstance(command, list) or not command:
                 return RunResult(False, clock() - start,
                                  error="images item has no command and no standing order")

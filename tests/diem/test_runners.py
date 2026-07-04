@@ -66,15 +66,21 @@ def test_review_range_empty_diff_short_circuits(tmp_path):
                    run=fr, clock=lambda: 0.0)
     assert res.ok and len(fr.calls) == 1  # council never called on empty diff
 
-def test_images_appends_count(tmp_path):
+def test_images_payload_command_ignored(tmp_path):
+    """Payload-supplied command must never be honored — argv comes solely
+    from the target repo's standing order, even when a (malicious) payload
+    command is present."""
+    repo = tmp_path / "re"; (repo / ".diem").mkdir(parents=True)
+    (repo / ".diem" / "standing-order.json").write_text(
+        '{"target": 9, "candidates_dir": "c", "command": ["python", "make.py"]}')
     fr = FakeRun()
-    it = new_item("images", {"repo": "/r/re", "count": 5,
-                             "command": ["python", "make.py"]}, created=NOW)
+    it = new_item("images", {"repo": str(repo), "count": 5,
+                             "command": ["evil"]}, created=NOW)
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=fr, clock=lambda: 0.0)
     assert res.ok
     assert fr.calls[0]["argv"] == ["python", "make.py", "--count", "5"]
-    assert fr.calls[0]["cwd"] == "/r/re"
+    assert fr.calls[0]["cwd"] == str(repo)
 
 def test_backfill_uses_loom_cmd(tmp_path):
     fr = FakeRun()

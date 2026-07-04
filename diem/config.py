@@ -9,6 +9,26 @@ from pathlib import Path
 DEFAULT_CONFIG = Path.home() / ".config" / "diem" / "config.toml"
 
 
+def _config_die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _parse_hhmm(value: str, label: str) -> tuple[int, int]:
+    """Two-part int split of an HH:MM string; dies with SystemExit(2) on
+    anything else (wrong shape, non-int parts, or out-of-range 0-23/0-59)."""
+    parts = str(value).split(":")
+    if len(parts) != 2:
+        _config_die(f"{label} must be HH:MM")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        _config_die(f"{label} must be HH:MM")
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        _config_die(f"{label} must be a valid time (00-23:00-59)")
+    return h, m
+
+
 @dataclass(frozen=True)
 class Checkpoint:
     time: str   # "HH:MM" local
@@ -58,7 +78,7 @@ class DiemConfig:
                   file=sys.stderr)
             raise SystemExit(2)
         kw = {"daily_diem": float(raw["daily_diem"]),
-              "repos": [Path(r) for r in raw.get("repos", [])]}
+              "repos": [Path(r).expanduser() for r in raw.get("repos", [])]}
         if "checkpoints" in raw:
             kw["checkpoints"] = [Checkpoint(c["time"], float(c["floor"]))
                                  for c in raw["checkpoints"]]
@@ -67,7 +87,7 @@ class DiemConfig:
                 kw[key] = raw[key]
         for key in ("state_dir", "outputs_dir", "loom_repo"):
             if key in raw:
-                kw[key] = Path(raw[key])
+                kw[key] = Path(raw[key]).expanduser()
         if "loom_cmd" in raw:
             kw["loom_cmd"] = list(raw["loom_cmd"])
         seeds = {k: dict(v) for k, v in _DEFAULT_SEEDS.items()}
@@ -76,6 +96,20 @@ class DiemConfig:
         kw["seeds"] = seeds
         kw["telegram"] = raw.get("telegram")
         kw["cmd_whitelist"] = raw.get("cmd_whitelist", {})
+
+        checkpoints = kw.get("checkpoints", _DEFAULT_CHECKPOINTS)
+        if not checkpoints:
+            _config_die("checkpoints must not be empty")
+        for cp in checkpoints:
+            _parse_hhmm(cp.time, f"checkpoint time {cp.time!r}")
+        deadline = kw.get("deadline", "00:50")
+        reset = kw.get("reset", "01:00")
+        dh, dm = _parse_hhmm(deadline, f"deadline {deadline!r}")
+        rh, rm = _parse_hhmm(reset, f"reset {reset!r}")
+        if f"{dh:02d}:{dm:02d}" >= f"{rh:02d}:{rm:02d}":
+            _config_die(f"deadline ({deadline}) must be earlier than reset "
+                        f"({reset}) — the drain's day-anchoring contract")
+
         return cls(**kw)
 
 

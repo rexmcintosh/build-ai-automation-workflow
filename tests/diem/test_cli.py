@@ -43,6 +43,19 @@ def test_queue_add_review_and_images(tmp_path):
     assert by_type["review"].payload == {"repo": "/r/swim", "diff": True}
     assert by_type["images"].payload["count"] == 7
 
+@pytest.mark.parametrize("extra_args", [
+    ["review"],                                  # no repo
+    ["images", "/r/re"],                         # no count
+    ["images", "/r/re", "notanumber"],           # non-int count
+    ["cmd"],                                      # no name
+])
+def test_queue_add_missing_args_exit_2(tmp_path, capsys, extra_args):
+    cfgp = _cfg_file(tmp_path)
+    rc = cli.main(["queue", "add", *extra_args, "--config", str(cfgp)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.strip() != "" and len(err.strip().splitlines()) == 1
+
 def test_pause_and_resume(tmp_path):
     cfgp = _cfg_file(tmp_path)
     from diem.state import pause_until

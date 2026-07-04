@@ -131,15 +131,32 @@ def main(argv=None) -> int:
             if args.type == "ask":
                 payload = {"question": " ".join(args.args), "panel": args.panel}
             elif args.type == "review":
+                if not args.args:
+                    print("error: queue add review requires a repo path",
+                          file=sys.stderr)
+                    return 2
                 repo = args.args[0]
                 payload = ({"repo": repo, "range": args.range,
                             "head": args.range.split("..")[-1]} if args.range
                            else {"repo": repo, "diff": True})
             elif args.type == "images":
-                payload = {"repo": args.args[0], "count": int(args.args[1])}
+                if len(args.args) < 2:
+                    print("error: queue add images requires a repo path and a count",
+                          file=sys.stderr)
+                    return 2
+                try:
+                    count = int(args.args[1])
+                except ValueError:
+                    print(f"error: queue add images count must be an integer, "
+                          f"got {args.args[1]!r}", file=sys.stderr)
+                    return 2
+                payload = {"repo": args.args[0], "count": count}
             elif args.type == "backfill":
                 payload = {"max_targets": args.max_targets}
             elif args.type == "cmd":
+                if not args.args:
+                    print("error: queue add cmd requires a name", file=sys.stderr)
+                    return 2
                 payload = {"name": args.args[0]}
             it = new_item(args.type, payload, banked=True,
                           expires=args.expires, created=now_iso)

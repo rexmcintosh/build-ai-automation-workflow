@@ -66,8 +66,19 @@ def test_feedstock_shortfall_queues_images(tmp_path):
     q, rev = _bits(tmp_path)
     added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
     imgs = [i for i in added if i.type == "images"]
-    assert len(imgs) == 1 and imgs[0].payload["count"] == 3
-    assert imgs[0].payload["command"] == ["python", "make.py"]
+    assert len(imgs) == 1
+    assert imgs[0].payload == {"repo": str(repo), "count": 3}  # no command key
+
+def test_malformed_command_not_queued(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    so_dir = repo / ".diem"; so_dir.mkdir()
+    cand = repo / "candidates"; cand.mkdir()
+    (so_dir / "standing-order.json").write_text(json.dumps(
+        {"target": 4, "candidates_dir": "candidates",
+         "command": "python make.py"}))  # string, not a list — doomed item
+    q, rev = _bits(tmp_path)
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    assert all(i.type != "images" for i in added)
 
 def test_no_standing_order_no_images(tmp_path):
     repo = _mkrepo(tmp_path, "a")
