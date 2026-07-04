@@ -1,0 +1,96 @@
+# tests/diem/test_discover.py
+import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from diem.config import DiemConfig
+from diem.discover import discover
+from diem.queue import QueueDir
+from diem.state import Reviewed
+
+NOW = "2026-07-03T21:00:00"
+
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True, check=True)
+
+def _mkrepo(tmp_path, name):
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "one")
+    return repo
+
+def _cfg(tmp_path, repos):
+    return DiemConfig(daily_diem=100.0, repos=[Path(r) for r in repos],
+                      state_dir=tmp_path / "state")
+
+def _bits(tmp_path):
+    return QueueDir(tmp_path / "state"), Reviewed(tmp_path / "state" / "reviewed.json")
+
+def test_first_sighting_baselines_without_review(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    assert added == [] and rev.get(str(repo)) is not None
+
+def test_new_commits_queue_range_review(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)          # baseline
+    old = rev.get(str(repo))
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "two")
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    assert [i.type for i in added] == ["review"]
+    assert added[0].payload["range"].startswith(old)
+
+def test_dirty_tree_queues_diff_review(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    (repo / "x.py").write_text("x = 1\n")
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    assert [i.payload.get("diff") for i in added] == [True]
+    # second discovery same night: deduped
+    assert discover(_cfg(tmp_path, [repo]), q, rev, NOW) == []
+
+def test_feedstock_shortfall_queues_images(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    so_dir = repo / ".diem"; so_dir.mkdir()
+    cand = repo / "candidates"; cand.mkdir()
+    (cand / "t1.png").write_bytes(b"x")
+    (so_dir / "standing-order.json").write_text(json.dumps(
+        {"target": 4, "candidates_dir": "candidates",
+         "command": ["python", "make.py"]}))
+    q, rev = _bits(tmp_path)
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    imgs = [i for i in added if i.type == "images"]
+    assert len(imgs) == 1 and imgs[0].payload["count"] == 3
+    assert imgs[0].payload["command"] == ["python", "make.py"]
+
+def test_no_standing_order_no_images(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    assert all(i.type != "images" for i in discover(_cfg(tmp_path, [repo]), q, rev, NOW))
+
+def test_broken_repo_skipped(tmp_path):
+    notrepo = tmp_path / "plain"; notrepo.mkdir()
+    q, rev = _bits(tmp_path)
+    assert discover(_cfg(tmp_path, [notrepo]), q, rev, NOW) == []
+
+def test_archived_tonight_not_rediscovered(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)          # baseline
+    (repo / "x.py").write_text("x = 1\n")
+    day = "2026-07-03T01:00:00"
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day)
+    assert len(added) == 1
+    q.archive(added[0], {"ok": True})                       # ran at 21:00 checkpoint
+    # tree still dirty at the 23:00 checkpoint — must NOT re-queue tonight
+    assert discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day) == []
+    # next DIEM day: eligible again
+    assert len(discover(_cfg(tmp_path, [repo]), q, rev,
+                        "2026-07-04T21:00:00", day_start_iso="2026-07-04T01:00:00")) == 1
