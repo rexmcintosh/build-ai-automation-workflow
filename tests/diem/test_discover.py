@@ -2,7 +2,6 @@
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from diem.config import DiemConfig
 from diem.discover import discover
 from diem.queue import QueueDir
@@ -94,3 +93,51 @@ def test_archived_tonight_not_rediscovered(tmp_path):
     # next DIEM day: eligible again
     assert len(discover(_cfg(tmp_path, [repo]), q, rev,
                         "2026-07-04T21:00:00", day_start_iso="2026-07-04T01:00:00")) == 1
+
+def test_permission_blocked_standing_order_skips_not_crash(tmp_path):
+    import os
+    repo = _mkrepo(tmp_path, "a")
+    blocked = repo / ".diem"; blocked.mkdir()
+    (blocked / "standing-order.json").write_text(json.dumps(
+        {"target": 2, "candidates_dir": "c", "command": ["x"]}))
+    ok_repo = _mkrepo(tmp_path, "b")
+    os.chmod(blocked, 0o000)
+    try:
+        q, rev = _bits(tmp_path)
+        added = discover(_cfg(tmp_path, [repo, ok_repo]), q, rev, NOW)
+        assert added == []                      # both repos baselined, no crash
+        assert rev.get(str(ok_repo)) is not None  # second repo still processed
+    finally:
+        os.chmod(blocked, 0o755)
+
+def test_both_triggers_queue_single_review_preferring_range(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)   # baseline
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "two")
+    (repo / "x.py").write_text("x = 1\n")
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW)
+    assert len(added) == 1 and "range" in added[0].payload
+
+def test_moving_head_not_rereviewed_same_night(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    q, rev = _bits(tmp_path)
+    discover(_cfg(tmp_path, [repo]), q, rev, NOW)   # baseline
+    day = "2026-07-03T01:00:00"
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "two")
+    added = discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day)
+    q.archive(added[0], {"ok": True})
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "three")
+    assert discover(_cfg(tmp_path, [repo]), q, rev, NOW, day_start_iso=day) == []
+
+def test_absolute_candidates_dir_skipped(tmp_path):
+    repo = _mkrepo(tmp_path, "a")
+    (repo / ".diem").mkdir()
+    (repo / ".diem" / "standing-order.json").write_text(json.dumps(
+        {"target": 99, "candidates_dir": "/etc", "command": ["x"]}))
+    q, rev = _bits(tmp_path)
+    assert all(i.type != "images"
+               for i in discover(_cfg(tmp_path, [repo]), q, rev, NOW))

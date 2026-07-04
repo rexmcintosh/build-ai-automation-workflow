@@ -37,32 +37,50 @@ def discover(cfg, queue: QueueDir, reviewed: Reviewed, now_iso: str,
 
     for repo in cfg.repos:
         repo = Path(repo)
+        repo_key = str(repo)
         head = _git(repo, "rev-parse", "HEAD", run=run)
         if head:
-            old = reviewed.get(str(repo))
-            if old is None:
-                reviewed.set(str(repo), head)  # baseline, nothing to review yet
-            elif old != head:
-                _add(new_item("review", {"repo": str(repo),
-                                         "range": f"{old}..{head}",
-                                         "head": head}, created=now_iso))
+            old = reviewed.get(repo_key)
             status = _git(repo, "status", "--porcelain", run=run)
-            if status:
-                _add(new_item("review", {"repo": str(repo), "diff": True},
-                              created=now_iso))
+            if old is None:
+                reviewed.set(repo_key, head)  # baseline, nothing to review yet
+                moved = False
+            else:
+                moved = old != head
+            # at most one review per repo per night: a fresh range key on a
+            # later HEAD move wouldn't be caught by archived_keys_since, so
+            # also check by prefix (any outcome tonight) and by pending items
+            has_review_tonight = (
+                any(k.startswith(f"review:{repo_key}:") for k in done_tonight)
+                or any(it.type == "review" and it.payload.get("repo") == repo_key
+                       for it in queue.pending(now_iso))
+            )
+            if not has_review_tonight:
+                if moved:
+                    _add(new_item("review", {"repo": repo_key,
+                                             "range": f"{old}..{head}",
+                                             "head": head}, created=now_iso))
+                elif status:  # HEAD move (committed work) takes priority over
+                              # a still-dirty tree, which will be caught later
+                    _add(new_item("review", {"repo": repo_key, "diff": True},
+                                  created=now_iso))
 
         so_path = repo / ".diem" / "standing-order.json"
-        if so_path.exists():
-            try:
+        try:
+            if so_path.exists():
                 so = json.loads(so_path.read_text())
                 target = int(so["target"])
-                cand = repo / so["candidates_dir"]
+                cand_dir = so["candidates_dir"]
+                if Path(cand_dir).is_absolute():
+                    raise ValueError("candidates_dir must be relative to the repo")
+                cand = repo / cand_dir
                 command = list(so["command"])
-            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-                continue  # malformed standing order: skip, never invent
-            stock = sum(1 for f in cand.glob("*") if f.is_file()) if cand.is_dir() else 0
-            if stock < target:
-                _add(new_item("images", {"repo": str(repo),
-                                         "count": target - stock,
-                                         "command": command}, created=now_iso))
+                stock = (sum(1 for f in cand.glob("*") if f.is_file())
+                         if cand.is_dir() else 0)
+                if stock < target:
+                    _add(new_item("images", {"repo": repo_key,
+                                             "count": target - stock,
+                                             "command": command}, created=now_iso))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue  # malformed/unreadable standing order: skip, never invent
     return added
