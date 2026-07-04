@@ -54,6 +54,8 @@ def test_next_deadline_before_and_after_midnight():
     cfg = _cfg(Path("/tmp/x"))
     assert next_deadline(cfg, datetime(2026, 7, 3, 23, 5)) == datetime(2026, 7, 4, 0, 50)
     assert next_deadline(cfg, datetime(2026, 7, 4, 0, 20)) == datetime(2026, 7, 4, 0, 50)
+    assert next_deadline(cfg, datetime(2026, 7, 4, 0, 55)) == datetime(2026, 7, 4, 0, 50)
+    assert next_deadline(cfg, datetime(2026, 7, 4, 1, 30)) == datetime(2026, 7, 5, 0, 50)
 
 def test_drains_until_floor(tmp_path):
     cfg = _cfg(tmp_path)
@@ -136,6 +138,46 @@ def test_filler_backfill_tops_up_empty_queue(tmp_path):
     assert 1 <= len(r.ran) <= 2
     assert all(i.type == "backfill" and i.payload["max_targets"] == 3 for i in r.ran)
     assert q.night_count("backfill", "2026-07-03T01:00:00") <= 2  # cap respected
+
+def test_late_checkpoint_in_gap_aborts(tmp_path):
+    cfg = _cfg(tmp_path)
+    q, est, rev = _bits(tmp_path, cfg)
+    q.add(new_item("ask", {"question": "q", "panel": "decision"}, created=NOW_ISO))
+    r = FakeRunner()
+    summary = run_checkpoint(cfg, now=datetime(2026, 7, 4, 0, 55),
+                             balance=FakeBalance([80.0]), queue=q,
+                             estimates=est, reviewed=rev, runner=r)
+    assert summary["aborted"] == "past_deadline" and r.ran == []
+    assert len(q.pending(NOW_ISO)) == 1  # nothing consumed
+
+def test_post_reset_run_aborts(tmp_path):
+    cfg = _cfg(tmp_path)
+    q, est, rev = _bits(tmp_path, cfg)
+    summary = run_checkpoint(cfg, now=datetime(2026, 7, 4, 1, 30),
+                             balance=FakeBalance([100.0]), queue=q,
+                             estimates=est, reviewed=rev, runner=FakeRunner())
+    assert summary["aborted"] == "no_checkpoint_fired"
+
+def test_mid_day_run_aborts(tmp_path):
+    cfg = _cfg(tmp_path)
+    q, est, rev = _bits(tmp_path, cfg)
+    summary = run_checkpoint(cfg, now=datetime(2026, 7, 3, 20, 0),
+                             balance=FakeBalance([100.0]), queue=q,
+                             estimates=est, reviewed=rev, runner=FakeRunner())
+    assert summary["aborted"] == "no_checkpoint_fired"
+
+def test_skipped_entries_unique(tmp_path):
+    cfg = _cfg(tmp_path, seeds={"images": {"cost": 1.0, "duration_s": 3600},
+                                "ask": {"cost": 1.0, "duration_s": 60}})
+    q, est, rev = _bits(tmp_path, cfg)
+    q.add(new_item("images", {"repo": "/r", "count": 9, "command": ["x"]}, created=NOW_ISO))
+    q.add(new_item("ask", {"question": "a", "panel": "decision"}, created=NOW_ISO))
+    q.add(new_item("ask", {"question": "b", "panel": "decision"}, created=NOW_ISO))
+    summary = run_checkpoint(cfg, now=datetime(2026, 7, 4, 0, 30),
+                             balance=FakeBalance([50.0, 45.0, 45.0, 40.0, 40.0]),
+                             queue=q, estimates=est, reviewed=rev, runner=FakeRunner())
+    ids = [s["id"] for s in summary["skipped"]]
+    assert len(ids) == len(set(ids))
 
 def test_estimates_recorded_from_balance_delta(tmp_path):
     cfg = _cfg(tmp_path)

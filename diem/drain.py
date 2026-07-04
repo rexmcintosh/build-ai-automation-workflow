@@ -18,13 +18,30 @@ def _at(now: datetime, hhmm: str) -> datetime:
 
 
 def next_deadline(cfg, now: datetime) -> datetime:
-    d = _at(now, cfg.deadline)
-    return d if now <= d else d + timedelta(days=1)
+    """Deadline of the CURRENT DIEM day — may already be in the past (e.g. in
+    the (deadline, reset) gap). Anchored via next_reset so a late-firing
+    checkpoint can never see a ~24h-out deadline. Config contract: deadline
+    falls between the last checkpoint and reset on the clock (00:50 < 01:00)."""
+    return _at(next_reset(cfg, now), cfg.deadline)
 
 
 def next_reset(cfg, now: datetime) -> datetime:
     r = _at(now, cfg.reset)
     return r if now <= r else r + timedelta(days=1)
+
+
+def _last_fired(cfg, now: datetime):
+    """(fired_at, Checkpoint) of the latest checkpoint at-or-before now within
+    the current DIEM day, or None if none has fired yet."""
+    day_start = next_reset(cfg, now) - timedelta(days=1)
+    best = None
+    for cp in cfg.checkpoints:
+        t = _at(day_start, cp.time)
+        if t < day_start:
+            t += timedelta(days=1)
+        if t <= now and (best is None or t > best[0]):
+            best = (t, cp)
+    return best
 
 
 def floor_for(cfg, now: datetime) -> float:
@@ -33,15 +50,8 @@ def floor_for(cfg, now: datetime) -> float:
     00:05 the operative checkpoint is *yesterday's* 23:00, and a 00:15
     checkpoint belongs to the day that started the previous 01:00.
     Before the first checkpoint fires, use the first (most conservative)."""
-    day_start = next_reset(cfg, now) - timedelta(days=1)
-    best = None
-    for cp in cfg.checkpoints:
-        t = _at(day_start, cp.time)
-        if t < day_start:
-            t += timedelta(days=1)
-        if t <= now and (best is None or t > best[0]):
-            best = (t, cp.floor)
-    frac = best[1] if best else cfg.checkpoints[0].floor
+    best = _last_fired(cfg, now)
+    frac = best[1].floor if best else cfg.checkpoints[0].floor
     return frac * cfg.daily_diem
 
 
@@ -59,6 +69,13 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
         summary["aborted"] = "paused"
         return summary
 
+    if now > deadline:
+        summary["aborted"] = "past_deadline"
+        return summary
+    if _last_fired(cfg, now) is None:
+        summary["aborted"] = "no_checkpoint_fired"  # off-schedule run (post-reset or mid-day)
+        return summary
+
     lock = Lock(cfg.state_dir / "drain.lock")
     if not lock.acquire():
         summary["aborted"] = "locked"
@@ -70,6 +87,7 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
                  run=run)
         elapsed = 0.0    # simulated wall-clock from job durations (tests inject now)
         attempted = set()  # ids run this checkpoint — failures retry NEXT checkpoint
+        skipped_ids = set()  # dedupe: an unfittable item is re-seen every pass
         while True:
             try:
                 bal = balance.diem_balance()
@@ -90,14 +108,16 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
                     continue
                 cost, dur = estimates.estimate(it.type)
                 if bal - cost < floor:
-                    skipped_this_pass.append({"id": it.id, "type": it.type,
-                                              "reason": "budget"})
+                    reason = "budget"
                 elif eff_now + timedelta(seconds=dur) > deadline:
-                    skipped_this_pass.append({"id": it.id, "type": it.type,
-                                              "reason": "deadline"})
+                    reason = "deadline"
                 else:
                     picked = it
                     break
+                if it.id not in skipped_ids:
+                    skipped_ids.add(it.id)
+                    skipped_this_pass.append({"id": it.id, "type": it.type,
+                                              "reason": reason})
             summary["skipped"].extend(skipped_this_pass)
 
             if picked is None:
