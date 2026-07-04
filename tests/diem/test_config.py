@@ -70,6 +70,13 @@ def test_load_missing_daily_diem_exits(tmp_path):
     with pytest.raises(SystemExit):
         DiemConfig.load(p)
 
+def test_daily_diem_zero_exits_2(tmp_path):
+    p = tmp_path / "bad.toml"
+    p.write_text("daily_diem = 0\nrepos = []\n")
+    with pytest.raises(SystemExit) as exc:
+        DiemConfig.load(p)
+    assert exc.value.code == 2
+
 @pytest.mark.parametrize("line", [
     'VENICE_API_KEY=sk-abc123',
     'VENICE_KEY="sk-abc123"',

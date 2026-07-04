@@ -34,9 +34,23 @@ def _diem_day(cfg, now: datetime) -> str:
     return (next_reset(cfg, now) - timedelta(days=1)).date().isoformat()
 
 
+def _drain_env(key: str) -> dict:
+    """Env for shelled-out subprocesses (council/loom/cmd). Cron's PATH is
+    just /usr/bin:/bin, so a bare `council` argv is unresolvable unless
+    pipx's bin dir is on it — prepend it, without duplicating an entry
+    that's already there."""
+    env = {**os.environ, "VENICE_API_KEY": key, "VENICE_KEY": key}
+    pipx_bin = str(Path.home() / ".local" / "bin")
+    path = env.get("PATH", "/usr/bin:/bin")
+    if pipx_bin not in path.split(":"):
+        path = f"{pipx_bin}:{path}"
+    env["PATH"] = path
+    return env
+
+
 def _cmd_drain(cfg, now: datetime) -> int:
     key = load_venice_key()
-    env = {**os.environ, "VENICE_API_KEY": key, "VENICE_KEY": key}
+    env = _drain_env(key)
     q, est, rev = _bits(cfg)
     balance = BalanceClient(key)
 

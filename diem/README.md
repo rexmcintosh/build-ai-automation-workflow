@@ -43,8 +43,9 @@ cmd = {cost = 1.0, duration_s = 300}
 bot_token = "..."
 chat_id = "..."
 
-[cmd_whitelist]
-repo_path = ["cmd1", "cmd2"]
+[cmd_whitelist.teasers]
+repo = "/home/dev/projects/romance-empire"
+argv = ["python", "scripts/make_teasers.py"]
 ```
 
 Config contract: `deadline` must fall between the last checkpoint time and `reset` on the clock (e.g., 00:50 < 01:00). `daily_diem` is required; all others inherit sensible defaults.
@@ -93,7 +94,7 @@ diem queue add ask "Reply with PONG" --panel decision
 diem queue add review /path/to/repo --range main..feature
 diem queue add images /path/to/repo 3
 diem queue add backfill --max-targets 2
-diem queue add cmd reponame mycmd
+diem queue add cmd teasers
 diem queue list
 diem queue rm <id>
 ```
@@ -108,8 +109,8 @@ Output destinations: review reports → `~/.local/state/diem/outputs/reviews/`; 
 | 23:00 | 15%   | Probably done; drain most of it |
 | 00:15 | 0%    | Use-it-or-lose-it endgame |
 
-Drain loop: read live balance; if ≤ floor, stop. Pop job; skip if estimated cost would breach floor or if `now + duration > 00:50` (deadline). Run job (hard timeout at deadline), archive, loop. Failed jobs retry once at the next checkpoint. Never drains blind (balance endpoint down → abort checkpoint). Aborts with `past_deadline` if `now > 00:50`. Aborts with `no_checkpoint_fired` on off-schedule runs (enforces 21:00/23:00/00:15 only). One review per repo per night. Backfill capped at `backfill_max_per_night` jobs; `backfill_chunk` controls targets per job. Balance re-read between jobs — live operator use automatically throttles the drain; `diem pause` quiets it explicitly.
+Drain loop: read live balance; if ≤ floor, stop. Pop job; skip if estimated cost would breach floor or if `now + duration > 00:50` (deadline). Run job (hard timeout at deadline), archive, loop. Diem does not itself retry or back off on Venice 429/5xx — `council` and `loom` own their own request-level retry/backoff. Diem's retry granularity is one checkpoint: a failed job is requeued and tried again at the next checkpoint (once; second failure archives it as failed). Never drains blind: if the balance endpoint is unreachable, the whole checkpoint aborts (`balance_unavailable`) rather than guessing. Aborts with `past_deadline` if `now > 00:50`. Aborts with `no_checkpoint_fired` on off-schedule runs (enforces 21:00/23:00/00:15 only). One review per repo per night. Backfill capped at `backfill_max_per_night` jobs; `backfill_chunk` controls targets per job. Balance re-read between jobs — live operator use automatically throttles the drain; `diem pause` quiets it explicitly.
 
 ## Safety gates
 
-The drain is **read-and-stage only**. It never commits, pushes, merges, publishes, or touches KDP. Review findings land as report files; image candidates append to the repo's candidates dir; loom writes to its own store. All output sits behind the existing human gates. `cmd` runs only whitelisted commands keyed by repo. Images flagged `x-venice-is-content-violation` are quarantined and noted in the report. `images` queue items carry only `repo` and `count` — the command to run is never accepted from the queue payload. At run time the runner resolves argv SOLELY from the target repo's `.diem/standing-order.json` (checked again, since the file may have changed since discovery time); no standing order (or a malformed one) → no images job. This closes off a queue-dir writer smuggling arbitrary argv past the advertised whitelist/standing-order gate. This boundary keeps diem out of creative direction; open decisions (e.g., object-row direction) remain the operator's.
+The drain is **read-and-stage only**. It never commits, pushes, merges, publishes, or touches KDP. Review findings land as report files; image candidates append to the repo's candidates dir; loom writes to its own store. All output sits behind the existing human gates. `cmd` runs only whitelisted commands keyed by repo. Diem does not talk to Venice for images and does not inspect Venice response headers itself — the target repo's own standing-order pipeline owns image generation, `x-venice-is-content-violation` handling, and quarantine. Diem only counts files already staged in the standing order's `candidates_dir` against its `target` and, on a shortfall, queues an `images` job asking that pipeline to make up the difference; it never stages images itself. `images` queue items carry only `repo` and `count` — the command to run is never accepted from the queue payload. At run time the runner resolves argv SOLELY from the target repo's `.diem/standing-order.json` (checked again, since the file may have changed since discovery time); no standing order (or a malformed one) → no images job. This closes off a queue-dir writer smuggling arbitrary argv past the advertised whitelist/standing-order gate. This boundary keeps diem out of creative direction; open decisions (e.g., object-row direction) remain the operator's.

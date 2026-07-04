@@ -77,7 +77,11 @@ class DiemConfig:
             print("error: config needs daily_diem (your daily DIEM allowance)",
                   file=sys.stderr)
             raise SystemExit(2)
-        kw = {"daily_diem": float(raw["daily_diem"]),
+        daily_diem = float(raw["daily_diem"])
+        if daily_diem <= 0:
+            _config_die("daily_diem must be > 0 (drain floor math and evening "
+                        "ping percent depend on it)")
+        kw = {"daily_diem": daily_diem,
               "repos": [Path(r).expanduser() for r in raw.get("repos", [])]}
         if "checkpoints" in raw:
             kw["checkpoints"] = [Checkpoint(c["time"], float(c["floor"]))

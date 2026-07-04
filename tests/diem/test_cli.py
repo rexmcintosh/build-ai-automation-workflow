@@ -68,6 +68,21 @@ def test_drain_requires_checkpoint_flag(tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["drain", "--config", str(_cfg_file(tmp_path))])
 
+def test_drain_env_prepends_pipx_bin_dir_when_missing(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = cli._drain_env("k")
+    pipx_bin = str(Path.home() / ".local" / "bin")
+    assert env["PATH"].startswith(pipx_bin)
+    assert env["PATH"] == f"{pipx_bin}:/usr/bin:/bin"
+    assert env["VENICE_API_KEY"] == "k" and env["VENICE_KEY"] == "k"
+
+def test_drain_env_does_not_double_prepend(monkeypatch):
+    pipx_bin = str(Path.home() / ".local" / "bin")
+    monkeypatch.setenv("PATH", f"{pipx_bin}:/usr/bin:/bin")
+    env = cli._drain_env("k")
+    assert env["PATH"] == f"{pipx_bin}:/usr/bin:/bin"
+    assert env["PATH"].split(":").count(pipx_bin) == 1
+
 def test_status_exits_zero_when_balance_unavailable(tmp_path, monkeypatch, capsys):
     cfgp = _cfg_file(tmp_path)
     monkeypatch.setattr(cli, "load_venice_key", lambda: "k")
