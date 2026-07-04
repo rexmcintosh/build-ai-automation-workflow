@@ -35,3 +35,12 @@ def test_network_error_raises_unavailable():
 def test_missing_key_raises_unavailable():
     with pytest.raises(BalanceUnavailable):
         _client(FakeResp(body={"data": {}})).diem_balance()
+
+@pytest.mark.parametrize("body", [
+    {"data": None, "balances": None},
+    ["not", "a", "dict"],
+    {"data": {"balances": {"DIEM": "not-a-number"}}},
+])
+def test_malformed_200_bodies_raise_unavailable(body):
+    with pytest.raises(BalanceUnavailable):
+        _client(FakeResp(body=body)).diem_balance()

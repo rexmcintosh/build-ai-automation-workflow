@@ -29,7 +29,12 @@ class BalanceClient:
             body = r.json()
         except Exception as e:  # noqa: BLE001
             raise BalanceUnavailable(f"rate_limits non-JSON: {e}") from e
-        balances = body.get("data", {}).get("balances") or body.get("balances") or {}
-        if "DIEM" not in balances:
-            raise BalanceUnavailable(f"no DIEM in balances: {body!r:.200}")
-        return float(balances["DIEM"])
+        try:
+            balances = body.get("data", {}).get("balances") or body.get("balances") or {}
+            if "DIEM" not in balances:
+                raise BalanceUnavailable(f"no DIEM in balances: {body!r:.200}")
+            return float(balances["DIEM"])
+        except BalanceUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise BalanceUnavailable(f"unparseable balances envelope: {e}") from e
