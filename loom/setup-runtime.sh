@@ -31,14 +31,16 @@ git -C "$RUNTIME" checkout --quiet -B main origin/main
 git -C "$RUNTIME" reset --hard --quiet origin/main
 
 # 2. Dedicated venv with an editable install rooted in $RUNTIME (so `import loom`/`council`
-#    and _PROMPTS resolve here), plus loom's only non-stdlib dep beyond `requests`.
+#    and _PROMPTS resolve here), plus loom's non-stdlib deps beyond `requests`:
+#    PyYAML, and detect-secrets — WITHOUT it the secret gate (loom/gate.py) fails
+#    closed and quarantines every transcript it scans.
 if [ ! -x "$RUNTIME/.venv/bin/python" ]; then
   echo "[setup-runtime] creating venv at $RUNTIME/.venv"
   "$PY" -m venv "$RUNTIME/.venv"
 fi
 "$RUNTIME/.venv/bin/pip" install --quiet --upgrade pip
 "$RUNTIME/.venv/bin/pip" install --quiet -e "$RUNTIME"
-"$RUNTIME/.venv/bin/pip" install --quiet PyYAML
+"$RUNTIME/.venv/bin/pip" install --quiet PyYAML detect-secrets
 
 # 3. Verify isolation, exactly as the cron invokes it: PYTHONPATH bound to the runtime, from
 #    a neutral CWD (cron runs from /home/dev). loom must resolve to the runtime clone.
