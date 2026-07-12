@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 from loom import llm
 
@@ -45,10 +48,19 @@ class _Proc:
         self.stderr = stderr
 
 
-def test_build_argv_disables_plugins_via_settings():
+def test_build_argv_disables_all_plugins_and_mcp():
     argv = llm.build_argv("sonnet")
     assert "--settings" in argv
     assert argv[argv.index("--settings") + 1].endswith("headless-settings.json")
+    assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--mcp-config") + 1].endswith("headless-mcp.json")
+
+
+def test_headless_config_files_disable_everything():
+    base = Path(llm.__file__).parent
+    settings = json.loads((base / "headless-settings.json").read_text())
+    assert settings["enabledPlugins"] and all(v is False for v in settings["enabledPlugins"].values())
+    assert json.loads((base / "headless-mcp.json").read_text()) == {"mcpServers": {}}
 
 
 def test_run_raises_usage_limit_error_on_session_limit(monkeypatch):

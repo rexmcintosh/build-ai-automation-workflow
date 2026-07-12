@@ -28,6 +28,7 @@ _USAGE_LIMIT_RE = re.compile(
 )
 
 _SETTINGS_PATH = str(Path(__file__).parent / "headless-settings.json")
+_EMPTY_MCP_PATH = str(Path(__file__).parent / "headless-mcp.json")
 
 
 def _claude_bin() -> str:
@@ -38,7 +39,8 @@ def build_argv(model: str, allowed_tools: Optional[Sequence[str]] = None,
                skip_permissions: bool = False) -> List[str]:
     """Return the argv for a ``claude -p -`` call (prompt fed via stdin)."""
     argv = [_claude_bin(), "-p", "-", "--model", model, "--output-format", "text",
-            "--settings", _SETTINGS_PATH]
+            "--settings", _SETTINGS_PATH,
+            "--strict-mcp-config", "--mcp-config", _EMPTY_MCP_PATH]
     if allowed_tools:
         argv += ["--allowedTools", *allowed_tools]
     if skip_permissions:
