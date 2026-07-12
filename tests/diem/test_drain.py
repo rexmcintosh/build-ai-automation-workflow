@@ -187,3 +187,26 @@ def test_estimates_recorded_from_balance_delta(tmp_path):
                    estimates=est, reviewed=rev, runner=FakeRunner())
     cost, _dur = est.estimate("ask")
     assert cost == pytest.approx(0.5 + 0.3 * (3.0 - 0.5))  # EMA toward observed 3.0
+
+
+# --- UTC / midnight-reset (00:00 UTC epoch) config ---
+
+def _utc_cfg(**kw):
+    return _cfg(Path("/tmp/x"), reset="00:00", deadline="23:50",
+                checkpoints=[Checkpoint("21:00", 0.40), Checkpoint("23:00", 0.15),
+                             Checkpoint("23:45", 0.0)], **kw)
+
+def test_next_deadline_midnight_reset():
+    cfg = _utc_cfg()
+    # evening: deadline is 23:50 the same evening, just before the 00:00 reset
+    assert next_deadline(cfg, datetime(2026, 7, 3, 23, 5)) == datetime(2026, 7, 3, 23, 50)
+    assert next_deadline(cfg, datetime(2026, 7, 3, 21, 0)) == datetime(2026, 7, 3, 23, 50)
+    # just after the reset: deadline rolls to the coming night
+    assert next_deadline(cfg, datetime(2026, 7, 4, 0, 30)) == datetime(2026, 7, 4, 23, 50)
+
+def test_floor_for_utc_evening_checkpoints():
+    cfg = _utc_cfg()
+    assert floor_for(cfg, datetime(2026, 7, 3, 20, 0)) == 40.0  # pre-first: conservative
+    assert floor_for(cfg, datetime(2026, 7, 3, 21, 30)) == 40.0
+    assert floor_for(cfg, datetime(2026, 7, 3, 23, 5)) == 15.0
+    assert floor_for(cfg, datetime(2026, 7, 3, 23, 50)) == 0.0

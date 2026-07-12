@@ -18,11 +18,17 @@ def _at(now: datetime, hhmm: str) -> datetime:
 
 
 def next_deadline(cfg, now: datetime) -> datetime:
-    """Deadline of the CURRENT DIEM day — may already be in the past (e.g. in
-    the (deadline, reset) gap). Anchored via next_reset so a late-firing
-    checkpoint can never see a ~24h-out deadline. Config contract: deadline
-    falls between the last checkpoint and reset on the clock (00:50 < 01:00)."""
-    return _at(next_reset(cfg, now), cfg.deadline)
+    """Deadline of the CURRENT DIEM day — the hard cutoff shortly before reset.
+    Anchored via next_reset so a late-firing checkpoint never sees a ~24h-out
+    deadline. When the deadline's clock time is at/after the reset's (e.g. 23:50
+    before a 00:00 UTC reset), it belongs to the evening *before* the reset, so
+    anchor it to the day preceding next_reset; otherwise (00:50 before 01:00) it
+    shares the reset's date."""
+    reset_dt = next_reset(cfg, now)
+    dh, dm = map(int, cfg.deadline.split(":"))
+    rh, rm = map(int, cfg.reset.split(":"))
+    base = reset_dt if (dh, dm) < (rh, rm) else reset_dt - timedelta(days=1)
+    return _at(base, cfg.deadline)
 
 
 def next_reset(cfg, now: datetime) -> datetime:

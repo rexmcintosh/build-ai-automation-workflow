@@ -129,6 +129,16 @@ def test_deadline_not_before_reset_exits_2(tmp_path):
         DiemConfig.load(p)
     assert exc.value.code == 2
 
+def test_midnight_reset_config_loads(tmp_path):
+    # 00:00 UTC epoch: deadline 23:50 sits the evening before reset 00:00 — a valid
+    # 10-minute lead even though "23:50" > "00:00" as strings.
+    p = tmp_path / "utc.toml"
+    p.write_text('daily_diem = 31.0\nrepos = []\ndeadline = "23:50"\nreset = "00:00"\n'
+                 '[[checkpoints]]\ntime = "21:00"\nfloor = 0.40\n'
+                 '[[checkpoints]]\ntime = "23:45"\nfloor = 0.0\n')
+    cfg = DiemConfig.load(p)
+    assert cfg.reset == "00:00" and cfg.deadline == "23:50"
+
 @pytest.mark.parametrize("bad_time", ["25:00", "10:60", "notatime", "1", "1:2:3"])
 def test_bad_time_string_exits_2(tmp_path, bad_time):
     p = tmp_path / "bad.toml"

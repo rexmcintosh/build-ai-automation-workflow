@@ -133,3 +133,45 @@ def test_drain_report_failure_does_not_crash(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "write_morning_report", boom)
     monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 4, 0, 20))
     assert cli.main(["drain", "--checkpoint", "--config", str(cfgp)]) == 0
+
+
+def test_now_is_utc(monkeypatch):
+    # Force a non-UTC process TZ; _now must still report UTC wall-clock, not local.
+    import time
+    from datetime import timezone
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        got = cli._now()
+        ref = datetime.now(timezone.utc).replace(tzinfo=None)
+        assert got.tzinfo is None                              # naive
+        assert abs((ref - got).total_seconds()) < 5           # UTC, not LA (~7-8h off)
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+
+
+def _utc_cfg_file(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(f'daily_diem = 100.0\nrepos = []\n'
+                 f'state_dir = "{tmp_path / "state"}"\n'
+                 f'outputs_dir = "{tmp_path / "out"}"\n'
+                 f'deadline = "23:50"\nreset = "00:00"\n'
+                 f'[[checkpoints]]\ntime = "21:00"\nfloor = 0.40\n'
+                 f'[[checkpoints]]\ntime = "23:00"\nfloor = 0.15\n'
+                 f'[[checkpoints]]\ntime = "23:45"\nfloor = 0.0\n')
+    return p
+
+def test_morning_report_fires_with_midnight_reset(tmp_path, monkeypatch):
+    p = _utc_cfg_file(tmp_path)
+    sent = []
+    monkeypatch.setattr(cli, "load_venice_key", lambda: "k")
+    monkeypatch.setattr(cli, "BalanceClient", lambda key: object())
+    monkeypatch.setattr(cli, "run_checkpoint", lambda *a, **k: _summary())
+    monkeypatch.setattr(cli, "send_telegram", lambda cfg, text: sent.append(text) or True)
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 3, 23, 5))
+    cli.main(["drain", "--checkpoint", "--config", str(p)])       # first cp → evening ping
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 3, 23, 50))
+    cli.main(["drain", "--checkpoint", "--config", str(p)])       # last cp (23:45) → report
+    assert (tmp_path / "state" / "reports" / "2026-07-03.md").exists()
+    assert len(sent) == 2 and "Report" in sent[1]

@@ -6,12 +6,12 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .balance import BalanceClient, BalanceUnavailable
 from .config import DiemConfig, load_venice_key
-from .drain import floor_for, next_deadline, next_reset, run_checkpoint
+from .drain import _last_fired, floor_for, next_deadline, next_reset, run_checkpoint
 from .queue import QueueDir, new_item
 from .report import evening_ping, send_telegram, write_morning_report
 from .runners import run_item
@@ -20,7 +20,9 @@ from .queue import Item  # noqa: F401 (re-export convenience for sessions)
 
 
 def _now() -> datetime:
-    return datetime.now()
+    # The DIEM epoch resets at 00:00 UTC; anchor all timing to UTC regardless of
+    # the host/process timezone. Naive UTC keeps the rest of the naive datetime math.
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _bits(cfg):
@@ -70,8 +72,9 @@ def _cmd_drain(cfg, now: datetime) -> int:
     if first_of_night:
         send_telegram(cfg, evening_ping(summary, cfg))
     last_cp = max(cfg.checkpoints,
-                  key=lambda c: (c.time < cfg.reset, c.time))  # 00:15 sorts last
-    if now.strftime("%H:%M") >= last_cp.time and now.strftime("%H:%M") < cfg.reset:
+                  key=lambda c: (c.time < cfg.reset, c.time))  # a post-midnight cp sorts last
+    fired = _last_fired(cfg, now)
+    if fired is not None and fired[1].time == last_cp.time:
         try:
             summaries = [json.loads(l) for l in jl.read_text().splitlines() if l.strip()]
             path = write_morning_report(cfg, day, summaries)

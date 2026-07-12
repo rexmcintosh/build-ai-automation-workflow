@@ -4,9 +4,15 @@ from __future__ import annotations
 import sys
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DEFAULT_CONFIG = Path.home() / ".config" / "diem" / "config.toml"
+
+# The deadline is the hard cutoff shortly before the reset (epoch). It may sit on
+# the previous evening when reset is at/after midnight (23:50 before a 00:00 UTC
+# reset), so its lead over reset — not a raw HH:MM ordering — is what we validate.
+_DEADLINE_MAX_LEAD_S = 6 * 3600
 
 
 def _config_die(msg: str) -> None:
@@ -110,8 +116,19 @@ class DiemConfig:
         reset = kw.get("reset", "01:00")
         dh, dm = _parse_hhmm(deadline, f"deadline {deadline!r}")
         rh, rm = _parse_hhmm(reset, f"reset {reset!r}")
-        if f"{dh:02d}:{dm:02d}" >= f"{rh:02d}:{rm:02d}":
-            _config_die(f"deadline ({deadline}) must be earlier than reset "
+        # Anchor both to a reference day (mirroring drain.next_reset/next_deadline)
+        # and require the deadline to land shortly BEFORE the reset. This accepts
+        # 23:50-before-00:00 (10-min lead across midnight) while still rejecting a
+        # deadline that falls after the reset (e.g. 01:30 vs 01:00 → ~23.5h lead).
+        ref = datetime(2000, 1, 1, 12, 0)
+        r = ref.replace(hour=rh, minute=rm, second=0, microsecond=0)
+        if ref > r:
+            r += timedelta(days=1)
+        base = r if (dh, dm) < (rh, rm) else r - timedelta(days=1)
+        d = base.replace(hour=dh, minute=dm, second=0, microsecond=0)
+        lead = (r - d).total_seconds()
+        if not (0 < lead <= _DEADLINE_MAX_LEAD_S):
+            _config_die(f"deadline ({deadline}) must fall shortly before reset "
                         f"({reset}) — the drain's day-anchoring contract")
 
         return cls(**kw)
