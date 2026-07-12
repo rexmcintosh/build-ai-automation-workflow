@@ -20,8 +20,14 @@ def scrub(text: str) -> str:
 
 
 def build_summary(counts: Dict[str, int], shadow_commits: int, oldest_age_days: int,
-                  rejected: List[Tuple[str, str]], proposed: List[str]) -> str:
+                  rejected: List[Tuple[str, str]], proposed: List[str],
+                  limit_hit: bool = False) -> str:
     parts = ["🧵 Loom run"]
+    if limit_hit:
+        parts.append(
+            f"⏸️ Paused — Claude usage limit reached; distilled {counts.get('distilled', 0)} "
+            f"before pausing, rest deferred to next run"
+        )
     parts.append(" ".join(f"{k}={v}" for k, v in counts.items()))
     stale = "  ⚠️ STALE" if oldest_age_days >= STALE_DAYS else ""
     parts.append(f"loom-shadow: {shadow_commits} commits to review; oldest {oldest_age_days}d{stale}")
@@ -46,4 +52,5 @@ def format_run_summary(d: dict) -> str:
                          shadow_commits=int(d.get("shadow_commits", 0)),
                          oldest_age_days=int(d.get("oldest_age_days", 0)),
                          rejected=rejected,
-                         proposed=d.get("proposed", []))
+                         proposed=d.get("proposed", []),
+                         limit_hit=bool(d.get("limit_hit")))

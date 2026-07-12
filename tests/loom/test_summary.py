@@ -47,3 +47,11 @@ def test_format_run_summary_from_absorb_dict():
          "shadow_commits": 5, "oldest_age_days": 9}
     s = format_run_summary(d)
     assert "committed=2" in s and "s1#0" in s and "STALE" in s and "5 commits" in s
+
+
+def test_limit_hit_renders_paused_headline():
+    d = {"distilled": 4, "failed": 0, "committed": 0, "deferred": 0,
+         "limit_hit": True, "shadow_commits": 0, "oldest_age_days": 0}
+    s = format_run_summary(d)
+    assert "Paused" in s and "usage limit" in s.lower()
+    assert "4" in s
