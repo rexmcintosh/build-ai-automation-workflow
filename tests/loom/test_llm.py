@@ -1,3 +1,4 @@
+import pytest
 from loom import llm
 
 
@@ -33,6 +34,36 @@ def test_run_raises_on_nonzero(monkeypatch):
         stdout = ""
         stderr = "boom"
     monkeypatch.setattr(llm.subprocess, "run", lambda *a, **k: FakeProc())
-    import pytest
     with pytest.raises(llm.LLMError):
         llm.run("prompt", model="opus")
+
+
+class _Proc:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_build_argv_disables_plugins_via_settings():
+    argv = llm.build_argv("sonnet")
+    assert "--settings" in argv
+    assert argv[argv.index("--settings") + 1].endswith("headless-settings.json")
+
+
+def test_run_raises_usage_limit_error_on_session_limit(monkeypatch):
+    def fake_run(argv, **kwargs):
+        return _Proc(1, stdout="You've hit your session limit · resets 5:10am (Europe/Lisbon)")
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    with pytest.raises(llm.UsageLimitError):
+        llm.run("hi", model="sonnet")
+
+
+def test_run_raises_plain_llmerror_with_stdout_on_generic_failure(monkeypatch):
+    def fake_run(argv, **kwargs):
+        return _Proc(1, stdout="some diagnostic on stdout", stderr="")
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    with pytest.raises(llm.LLMError) as ei:
+        llm.run("hi", model="sonnet")
+    assert not isinstance(ei.value, llm.UsageLimitError)
+    assert "some diagnostic on stdout" in str(ei.value)
