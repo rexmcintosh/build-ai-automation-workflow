@@ -196,3 +196,52 @@ def test_cached_route_is_reused_not_recomputed(tmp_path, monkeypatch):
     summary = run_mod.absorb(cfg, shadow=False, backend="claude", distill=False)
     assert summary["committed"] == 1
     assert (cfg.wiki_worktree / "people" / "cached.md").exists()   # woven to the cached target
+
+
+def test_distill_aborts_on_usage_limit(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    for name in ("sessA", "sessB"):
+        t = projects / "p1" / f"{name}.jsonl"
+        t.parent.mkdir(parents=True, exist_ok=True)
+        t.write_text('{"type":"user","message":{"content":"hi"}}\n')
+    cfg = run_mod.Config(projects_dir=projects, loom_dir=tmp_path / "loom",
+                         state_path=tmp_path / "loom" / "state.json")
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    calls = {"n": 0}
+    def limited(prompt, model, **k):
+        calls["n"] += 1
+        raise run_mod.llm.UsageLimitError("claude usage limit")
+    monkeypatch.setattr(run_mod.llm, "run", limited)
+    summary = run_mod.absorb(cfg, shadow=True)
+    assert calls["n"] == 1                        # broke after the first limit; sessB untouched
+    assert summary["limit_hit"] is True
+    assert summary["distilled"] == 0 and summary["failed"] == 0
+    assert LoomState(cfg.state_path).state_of("sessA") == "pending"   # not advanced
+
+
+def test_usage_limit_in_distill_skips_weave(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    roles_seen = []
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            roles_seen.append(role)
+            raise run_mod.llm.UsageLimitError("limit")
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude")
+    assert summary["limit_hit"] is True
+    assert summary["committed"] == 0
+    assert roles_seen == ["distill"]              # weave/route never attempted
+
+
+def test_usage_limit_in_weave_is_caught(tmp_path, monkeypatch):
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            if role == "distill":
+                return "- type: fact\n  subject: x\n  learning: y\n  route: wiki/people/x"
+            raise run_mod.llm.UsageLimitError("limit during route/weave")
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude")   # must not raise
+    assert summary["limit_hit"] is True

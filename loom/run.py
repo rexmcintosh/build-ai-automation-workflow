@@ -67,7 +67,8 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     spool_dir = cfg.loom_dir / "spool"
     quarantine_dir = cfg.loom_dir / "quarantine"
     summary = {"distilled": 0, "quarantined": 0, "failed": 0,
-               "committed": 0, "deferred": 0, "rejected": 0, "deadline_hit": False}
+               "committed": 0, "deferred": 0, "rejected": 0, "deadline_hit": False,
+               "limit_hit": False}
 
     start = time.monotonic()
     def _expired() -> bool:
@@ -95,6 +96,9 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
             try:
                 text = extract_text(transcript)
                 learnings = be.complete("distill", "Extract durable learnings.", _distill_prompt(text))
+            except llm.UsageLimitError:
+                summary["limit_hit"] = True
+                break
             except Exception:
                 logging.exception("distill failed for %s", transcript)
                 summary["failed"] += 1
@@ -113,11 +117,16 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
             state.advance(sid, "distilled")
             summary["distilled"] += 1
 
+    if summary["limit_hit"]:
+        return summary
     if shadow:
         return summary
 
     # ---------- Stage 2: weave (v1) ----------
-    _weave_all(cfg, state, backend, max_targets, max_per_target, today, summary, _expired)
+    try:
+        _weave_all(cfg, state, backend, max_targets, max_per_target, today, summary, _expired)
+    except llm.UsageLimitError:
+        summary["limit_hit"] = True
     return summary
 
 
@@ -186,6 +195,8 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
             continue
         try:
             res = weave_target(be, repo, ledger, target, dirs[target], weave_now, today=today)
+        except llm.UsageLimitError:
+            raise
         except Exception:
             logging.exception("weave_target failed for %s", target)
             for entry in weave_now:
