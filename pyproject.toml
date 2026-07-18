@@ -11,13 +11,14 @@ dev = ["pytest>=8"]
 [project.scripts]
 council = "council.cli:main"
 diem = "diem.cli:main"
+session-gc = "sessiongc.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["council", "diem"]
+packages = ["council", "diem", "sessiongc"]
 
 [tool.setuptools.package-data]
 council = ["panels.toml"]
