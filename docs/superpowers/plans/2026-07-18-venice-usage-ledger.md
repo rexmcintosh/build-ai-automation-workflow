@@ -41,7 +41,7 @@
 ## File Structure
 
 **Create (Phase A — `venice_usage` package):**
-- `venice_usage/__init__.py` — re-exports `append`, `connect`, `DEFAULT_DB`.
+- `venice_usage/__init__.py` — re-exports `append`, `connect`, `default_db`.
 - `venice_usage/ledger.py` — schema, `connect()`, `append()`, `query_rollup()`.
 - `venice_usage/pricing.py` — static model→price map + `estimate_usd()`.
 - `venice_usage/cli.py` — `venice-usage log` / `venice-usage report`.
@@ -73,16 +73,13 @@ Foundation. Everything else depends on `venice-usage log` existing on PATH and `
 - Test: `tests/venice_usage/test_ledger.py`, `tests/venice_usage/__init__.py`
 
 **Interfaces:**
-- Produces: `append(*, project: str, task_type: str, model: str, tokens_in: int = 0, tokens_out: int = 0, usd: float | None = None, source: str | None = None, ts: str | None = None, db_path: str | Path | None = None) -> int` (returns new row id). `connect(db_path=None) -> sqlite3.Connection`. `DEFAULT_DB: Path`.
+- Produces: `append(*, project: str, task_type: str, model: str, tokens_in: int = 0, tokens_out: int = 0, usd: float | None = None, source: str | None = None, ts: str | None = None, db_path: str | Path | None = None) -> int` (returns new row id). `connect(db_path=None) -> sqlite3.Connection`. `default_db() -> Path` (resolves `$VENICE_USAGE_DB` live on each call — no import-time constant).
 - If `usd is None`, `append` calls `pricing.estimate_usd(model, tokens_in, tokens_out)` (Task A2) — for Task A1, stub `estimate_usd` to `return None` so tests pass, then A2 fills it.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/venice_usage/test_ledger.py
-import sqlite3
-from pathlib import Path
-import pytest
 from venice_usage.ledger import append, connect
 
 def test_append_writes_one_row(tmp_path):
@@ -107,6 +104,22 @@ def test_defaults_zero_tokens_and_null_usd(tmp_path):
     append(project="p", task_type="t", model="m", db_path=db)
     row = connect(db).execute("SELECT tokens_in,tokens_out,usd FROM usage").fetchone()
     assert row == (0, 0, None)  # unknown price -> NULL usd (stub estimate_usd)
+
+def test_default_db_resolved_from_env_at_call_time(tmp_path, monkeypatch):
+    # db_path omitted -> connect()/append() must resolve $VENICE_USAGE_DB LIVE, not a
+    # frozen import-time snapshot. Set it AFTER import to prove call-time resolution.
+    target = tmp_path / "env.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(target))
+    append(project="p", task_type="t", model="m")            # no db_path
+    assert target.exists()
+    assert connect().execute("SELECT count(*) FROM usage").fetchone()[0] == 1
+
+def test_auto_timestamp_is_iso_utc_second_precision(tmp_path):
+    import re
+    db = tmp_path / "l.db"
+    append(project="p", task_type="t", model="m", db_path=db)  # ts omitted -> _utcnow_iso()
+    ts = connect(db).execute("SELECT ts FROM usage").fetchone()[0]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # UTC, second precision, no offset
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -125,13 +138,11 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-def _default_db() -> Path:
-    # Resolve at CALL time (not import) so $VENICE_USAGE_DB set later — e.g. by a
-    # test's monkeypatch.setenv — is honored.
+def default_db() -> Path:
+    # Resolved at CALL time (not import) so $VENICE_USAGE_DB set later — e.g. by a
+    # test's monkeypatch.setenv — is honored. No import-time snapshot to go stale.
     return Path(os.environ.get(
         "VENICE_USAGE_DB", str(Path.home() / ".local/state/venice-usage/ledger.db")))
-
-DEFAULT_DB = _default_db()  # informational default (import-time); connect() re-resolves live
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -153,7 +164,7 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat()
 
 def connect(db_path=None) -> sqlite3.Connection:
-    db = Path(db_path) if db_path else _default_db()
+    db = Path(db_path) if db_path else default_db()
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db), timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -178,8 +189,8 @@ def append(*, project, task_type, model, tokens_in=0, tokens_out=0,
 
 ```python
 # venice_usage/__init__.py
-from .ledger import append, connect, DEFAULT_DB
-__all__ = ["append", "connect", "DEFAULT_DB"]
+from .ledger import append, connect, default_db
+__all__ = ["append", "connect", "default_db"]
 ```
 
 ```python
@@ -195,7 +206,7 @@ def estimate_usd(model, tokens_in, tokens_out):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/venice_usage/test_ledger.py -v`
-Expected: PASS (3 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -351,8 +362,8 @@ Also re-export it so `venice_usage.query_rollup(...)` works (the diem reconciler
 
 ```python
 # venice_usage/__init__.py
-from .ledger import append, connect, query_rollup, DEFAULT_DB
-__all__ = ["append", "connect", "query_rollup", "DEFAULT_DB"]
+from .ledger import append, connect, query_rollup, default_db
+__all__ = ["append", "connect", "query_rollup", "default_db"]
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
