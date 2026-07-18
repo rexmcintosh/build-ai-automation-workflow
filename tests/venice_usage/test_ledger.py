@@ -22,3 +22,19 @@ def test_defaults_zero_tokens_and_null_usd(tmp_path):
     append(project="p", task_type="t", model="m", db_path=db)
     row = connect(db).execute("SELECT tokens_in,tokens_out,usd FROM usage").fetchone()
     assert row == (0, 0, None)  # unknown price -> NULL usd (stub estimate_usd)
+
+def test_default_db_resolved_from_env_at_call_time(tmp_path, monkeypatch):
+    # db_path omitted -> connect()/append() must resolve $VENICE_USAGE_DB LIVE, not a
+    # frozen import-time snapshot. Set it AFTER import to prove call-time resolution.
+    target = tmp_path / "env.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(target))
+    append(project="p", task_type="t", model="m")            # no db_path
+    assert target.exists()
+    assert connect().execute("SELECT count(*) FROM usage").fetchone()[0] == 1
+
+def test_auto_timestamp_is_iso_utc_second_precision(tmp_path):
+    import re
+    db = tmp_path / "l.db"
+    append(project="p", task_type="t", model="m", db_path=db)  # ts omitted -> _utcnow_iso()
+    ts = connect(db).execute("SELECT ts FROM usage").fetchone()[0]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # UTC, second precision, no offset
