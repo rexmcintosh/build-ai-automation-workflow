@@ -12,13 +12,14 @@ dev = ["pytest>=8"]
 council = "council.cli:main"
 diem = "diem.cli:main"
 session-gc = "sessiongc.cli:main"
+venice-usage = "venice_usage.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["council", "diem", "sessiongc"]
+packages = ["council", "diem", "sessiongc", "venice_usage"]
 
 [tool.setuptools.package-data]
 council = ["panels.toml"]
