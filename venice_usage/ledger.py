@@ -52,3 +52,32 @@ def append(*, project, task_type, model, tokens_in=0, tokens_out=0,
             (ts, project, task_type, model, int(tokens_in), int(tokens_out), usd, source))
         conn.commit()
         return cur.lastrowid
+
+_GROUP_COLS = {"project", "task_type", "model", "source"}
+
+def query_rollup(*, since=None, until=None, project=None,
+                 group_by=("project", "task_type"), db_path=None) -> list[dict]:
+    group_by = tuple(group_by)
+    bad = [c for c in group_by if c not in _GROUP_COLS]
+    if bad:
+        raise ValueError(f"invalid group_by column(s): {bad}")
+    where, params = [], []
+    if since:   where.append("ts >= ?"); params.append(since)
+    if until:   where.append("ts <= ?"); params.append(until)
+    if project: where.append("project = ?"); params.append(project)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    cols = ", ".join(group_by)
+    sql = (f"SELECT {cols}, COUNT(*) AS calls, "
+           "COALESCE(SUM(tokens_in),0) AS tokens_in, "
+           "COALESCE(SUM(tokens_out),0) AS tokens_out, "
+           "COALESCE(SUM(usd),0.0) AS usd "
+           f"FROM usage{clause} GROUP BY {cols} ORDER BY usd DESC")
+    with closing(connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    # SQLite SUM() over REAL accumulates binary floating-point error (e.g. 0.09+0.01
+    # -> 0.09999999999999999); round to the same 6-decimal precision pricing.py's
+    # estimate_usd() already uses, so aggregated usd matches cent-level expectations.
+    for r in rows:
+        r["usd"] = round(r["usd"], 6)
+    return rows

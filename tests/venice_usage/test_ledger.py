@@ -38,3 +38,31 @@ def test_auto_timestamp_is_iso_utc_second_precision(tmp_path):
     append(project="p", task_type="t", model="m", db_path=db)  # ts omitted -> _utcnow_iso()
     ts = connect(db).execute("SELECT ts FROM usage").fetchone()[0]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # UTC, second precision, no offset
+
+from venice_usage.ledger import query_rollup
+
+def _seed(db):
+    append(project="romance", task_type="draft", model="claude-opus-4-8",
+           tokens_in=1000, tokens_out=1000, usd=0.09, ts="2026-07-18T01:00:00", db_path=db)
+    append(project="romance", task_type="edit", model="claude-sonnet-4-6",
+           tokens_in=500, tokens_out=200, usd=0.01, ts="2026-07-18T02:00:00", db_path=db)
+    append(project="council", task_type="review", model="claude-opus-4-8",
+           tokens_in=800, tokens_out=100, usd=0.02, ts="2026-07-19T02:00:00", db_path=db)
+
+def test_rollup_groups_and_sums(tmp_path):
+    db = tmp_path / "l.db"; _seed(db)
+    rows = query_rollup(group_by=("project",), db_path=db)
+    by = {r["project"]: r for r in rows}
+    assert by["romance"]["calls"] == 2 and by["romance"]["usd"] == 0.10
+    assert by["council"]["usd"] == 0.02
+
+def test_rollup_filters_since_until_and_project(tmp_path):
+    db = tmp_path / "l.db"; _seed(db)
+    rows = query_rollup(since="2026-07-18T00:00:00", until="2026-07-18T23:59:59",
+                        project="romance", group_by=("task_type",), db_path=db)
+    assert {r["task_type"] for r in rows} == {"draft", "edit"}
+
+def test_rollup_rejects_bad_group_by(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        query_rollup(group_by=("project; DROP TABLE usage",), db_path=tmp_path / "l.db")
