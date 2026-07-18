@@ -355,7 +355,12 @@ def query_rollup(*, since=None, until=None, project=None,
            f"FROM usage{clause} GROUP BY {cols} ORDER BY usd DESC")
     with closing(connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+    # SUM() over REAL accumulates float error (0.09 + 0.01 -> 0.09999999999999999);
+    # usd is money, so round each group's total to 6 places (micro-dollar) here.
+    for r in rows:
+        r["usd"] = round(r["usd"], 6)
+    return rows
 ```
 
 Also re-export it so `venice_usage.query_rollup(...)` works (the diem reconciler in B3 calls it that way):
@@ -374,7 +379,7 @@ Expected: PASS. (`group_by` columns come from a validated allowlist — never st
 - [ ] **Step 5: Commit**
 
 ```bash
-git add venice_usage/ledger.py tests/venice_usage/test_ledger.py
+git add venice_usage/ledger.py venice_usage/__init__.py tests/venice_usage/test_ledger.py
 git commit -m "feat(venice-usage): grouped rollup query"
 ```
 
