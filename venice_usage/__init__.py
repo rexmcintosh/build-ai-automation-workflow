@@ -1,2 +1,2 @@
-from .ledger import append, connect, DEFAULT_DB
-__all__ = ["append", "connect", "DEFAULT_DB"]
+from .ledger import append, connect, default_db
+__all__ = ["append", "connect", "default_db"]

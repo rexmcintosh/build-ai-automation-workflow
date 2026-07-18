@@ -1,6 +1,3 @@
-import sqlite3
-from pathlib import Path
-import pytest
 from venice_usage.ledger import append, connect
 
 def test_append_writes_one_row(tmp_path):
