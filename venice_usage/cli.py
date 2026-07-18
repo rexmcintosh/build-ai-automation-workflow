@@ -1,5 +1,7 @@
 """`venice-usage` — the universal append primitive + offline rollup.
-`log` is best-effort and always exits 0: logging must never break a caller."""
+`log` is best-effort and always exits 0 — logging must never break a caller —
+covering both a bad/unwritable ledger DB (append() failure) and a malformed
+invocation (argparse failure); see `main()` for the latter."""
 from __future__ import annotations
 import argparse
 import json
@@ -49,7 +51,23 @@ def main(argv=None) -> int:
     rp.add_argument("--since"); rp.add_argument("--until"); rp.add_argument("--project")
     rp.add_argument("--group-by", default="project,task_type", dest="group_by")
     rp.add_argument("--json", action="store_true")
-    a = p.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # Deviation from brief, flagged: argparse's own validation (missing --model,
+    # non-int --tokens-in, ...) calls sys.exit(2) from inside parse_args() below —
+    # *before* _cmd_log's try/except ever runs. That breaks the stated contract
+    # ("log ... ALWAYS exits 0 ... logging must never break a caller"): a
+    # malformed call-site invocation (e.g. a shell script under `set -e` passing a
+    # bad --tokens-in) would abort the caller. Catch that one extra failure mode
+    # for `log` specifically; `report`'s argparse/ValueError exit codes are
+    # intentionally untouched — report is a diagnostic command, not the
+    # best-effort primitive.
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as e:
+        if argv[:1] == ["log"] and e.code not in (0, None):
+            print("venice-usage: log failed (ignored): bad arguments", file=sys.stderr)
+            return 0
+        raise
     return _cmd_log(a) if a.cmd == "log" else _cmd_report(a)
 
 if __name__ == "__main__":
