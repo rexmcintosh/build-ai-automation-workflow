@@ -38,10 +38,19 @@ def test_log_never_raises_on_malformed_arguments(tmp_path, monkeypatch, capsys):
     rc = cli.main(["log", "--project", "p", "--task-type", "t", "--model", "m",
                    "--tokens-in", "not-a-number"])
     assert rc == 0
-    assert "venice-usage" in capsys.readouterr().err
+    assert "log failed (ignored)" in capsys.readouterr().err
 
 def test_log_missing_required_flag_still_exits_zero(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
     rc = cli.main(["log", "--project", "p", "--task-type", "t"])  # --model omitted
     assert rc == 0
-    assert "venice-usage" in capsys.readouterr().err
+    assert "log failed (ignored)" in capsys.readouterr().err
+
+def test_report_argparse_error_not_swallowed(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    # The log-only SystemExit guard in main() must NOT swallow report's argparse
+    # errors — report is a diagnostic command and must still exit non-zero.
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["report", "--nonexistent-flag"])
+    assert ei.value.code == 2
