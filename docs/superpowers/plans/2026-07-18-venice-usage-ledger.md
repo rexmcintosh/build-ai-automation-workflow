@@ -428,6 +428,28 @@ def test_report_json_rollup(tmp_path, monkeypatch, capsys):
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     assert data[0]["project"] == "romance" and abs(data[0]["usd"] - 0.25) < 1e-9
+
+def test_log_never_raises_on_malformed_arguments(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    # non-int --tokens-in: argparse would sys.exit(2) inside parse_args -> log still exits 0
+    rc = cli.main(["log", "--project", "p", "--task-type", "t", "--model", "m",
+                   "--tokens-in", "not-a-number"])
+    assert rc == 0
+    assert "log failed (ignored)" in capsys.readouterr().err
+
+def test_log_missing_required_flag_still_exits_zero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    rc = cli.main(["log", "--project", "p", "--task-type", "t"])   # missing --model
+    assert rc == 0
+    assert "log failed (ignored)" in capsys.readouterr().err
+
+def test_report_argparse_error_not_swallowed(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    # the log-only SystemExit guard must NOT swallow report's argparse errors
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["report", "--nonexistent-flag"])
+    assert ei.value.code == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -490,7 +512,18 @@ def main(argv=None) -> int:
     rp.add_argument("--since"); rp.add_argument("--until"); rp.add_argument("--project")
     rp.add_argument("--group-by", default="project,task_type", dest="group_by")
     rp.add_argument("--json", action="store_true")
-    a = p.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # `log` must exit 0 even on a MALFORMED invocation: argparse validation
+    # (missing/bad flag) calls sys.exit(2) inside parse_args() — before _cmd_log's
+    # try/except — which would abort a `set -e` caller. Swallow that for `log` only
+    # (report keeps normal argparse/ValueError exit codes; --help, code 0, is kept).
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as e:
+        if argv[:1] == ["log"] and e.code not in (0, None):
+            print("venice-usage: log failed (ignored): bad arguments", file=sys.stderr)
+            return 0
+        raise
     return _cmd_log(a) if a.cmd == "log" else _cmd_report(a)
 
 if __name__ == "__main__":
@@ -522,25 +555,22 @@ git add venice_usage/cli.py pyproject.toml tests/venice_usage/test_cli.py
 git commit -m "feat(venice-usage): log + report CLI, register console script"
 ```
 
-### Task A5: Install to PATH + smoke test
+### Task A5: Smoke-test the entry point (PATH install deferred to merge)
 
-**Files:** none (ops verification of the console script).
+**Files:** none (verification only). **Do NOT run a persistent `pipx` install from this worktree** — pipx would repoint the global `council` install at an ephemeral worktree that gets reaped, breaking the live `diem`/`council`. The real `venice-usage`-on-PATH install is a **post-merge deploy step**; on the branch, verify the entry point via module invocation.
 
-- [ ] **Step 1: Reinstall the pipx package so `venice-usage` lands on PATH**
-
-Run: `pipx reinstall council` (or, from the repo, `pipx install -e . --force`).
-Expected: `venice-usage` appears in `~/.local/bin/`.
-
-- [ ] **Step 2: Smoke test the round-trip against an isolated DB**
+- [ ] **Step 1: Smoke-test the console entry point via module invocation** (from the worktree root)
 
 Run:
 ```bash
-VENICE_USAGE_DB=/tmp/vu-smoke.db venice-usage log --project smoke --task-type t --model m --usd 0.01 --source manual
-VENICE_USAGE_DB=/tmp/vu-smoke.db venice-usage report --json
+VENICE_USAGE_DB=/tmp/vu-smoke.db python -m venice_usage.cli log --project smoke --task-type t --model m --usd 0.01 --source manual
+VENICE_USAGE_DB=/tmp/vu-smoke.db python -m venice_usage.cli report --json
 ```
-Expected: report prints one `smoke` row with `usd 0.01`. Then `rm /tmp/vu-smoke.db*`.
+Expected: report prints one `smoke` row with `usd 0.01`. Then `rm -f /tmp/vu-smoke.db*`.
 
-- [ ] **Step 3: Commit** (nothing to commit; note completion in the map's Phase-2b line).
+- [ ] **Step 2: Post-merge deploy step (record, do not run on the branch)**
+
+After this branch merges to `main`, run `pipx reinstall council` (or `pipx install "$HOME/projects/build-ai-automation-workflow" --force`) so `venice-usage` lands on `~/.local/bin/` for Phase C shell/Node call-sites to invoke. Until then, in-monorepo callers (diem/council/loom) import `venice_usage` directly and need no PATH entry.
 
 ---
 
