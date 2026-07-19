@@ -1,7 +1,7 @@
 import textwrap
 from pathlib import Path
 import pytest
-from diem.config import DiemConfig, load_venice_key
+from diem.config import DiemConfig, load_venice_key, load_venice_admin_key
 
 TOML = textwrap.dedent("""
     daily_diem = 100.0
@@ -92,6 +92,16 @@ def test_load_venice_key_missing_exits(tmp_path):
     env.write_text("OTHER=x\n")
     with pytest.raises(SystemExit):
         load_venice_key(env)
+
+def test_load_admin_key_reads_venice_admin_key(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text('VENICE_ADMIN_KEY="sk-admin-xyz"\nVENICE_API_KEY=sk-inf\n')
+    assert load_venice_admin_key(env) == "sk-admin-xyz"
+
+def test_load_admin_key_missing_exits_2(tmp_path):
+    env = tmp_path / ".env"; env.write_text("VENICE_API_KEY=sk-inf\n")
+    with pytest.raises(SystemExit):
+        load_venice_admin_key(env)
 
 def test_partial_seed_override_keeps_default_fields(tmp_path):
     p = tmp_path / "s.toml"
