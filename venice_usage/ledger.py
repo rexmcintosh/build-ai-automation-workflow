@@ -8,8 +8,10 @@ from pathlib import Path
 def default_db() -> Path:
     # Resolve at CALL time (not import) so $VENICE_USAGE_DB set later — e.g. by a
     # test's monkeypatch.setenv — is honored.
-    return Path(os.environ.get(
-        "VENICE_USAGE_DB", str(Path.home() / ".local/state/venice-usage/ledger.db")))
+    env = os.environ.get("VENICE_USAGE_DB")
+    if env:  # absent OR empty-string -> use the default path
+        return Path(env)
+    return Path.home() / ".local/state/venice-usage/ledger.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -57,7 +59,11 @@ _GROUP_COLS = {"project", "task_type", "model", "source"}
 
 def query_rollup(*, since=None, until=None, project=None,
                  group_by=("project", "task_type"), db_path=None) -> list[dict]:
+    if isinstance(group_by, str):
+        raise ValueError("group_by must be a sequence of columns, not a string")
     group_by = tuple(group_by)
+    if not group_by:
+        raise ValueError("group_by must name at least one column")
     bad = [c for c in group_by if c not in _GROUP_COLS]
     if bad:
         raise ValueError(f"invalid group_by column(s): {bad}")

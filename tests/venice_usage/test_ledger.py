@@ -34,10 +34,13 @@ def test_default_db_resolved_from_env_at_call_time(tmp_path, monkeypatch):
 
 def test_auto_timestamp_is_iso_utc_second_precision(tmp_path):
     import re
+    from datetime import datetime, timezone
     db = tmp_path / "l.db"
     append(project="p", task_type="t", model="m", db_path=db)  # ts omitted -> _utcnow_iso()
     ts = connect(db).execute("SELECT ts FROM usage").fetchone()[0]
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # UTC, second precision, no offset
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # shape: UTC, second precision
+    got = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - got).total_seconds()) < 10  # actually UTC-now
 
 from venice_usage.ledger import query_rollup
 
@@ -66,3 +69,19 @@ def test_rollup_rejects_bad_group_by(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         query_rollup(group_by=("project; DROP TABLE usage",), db_path=tmp_path / "l.db")
+
+def test_rollup_rejects_empty_group_by(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        query_rollup(group_by=(), db_path=tmp_path / "l.db")
+
+def test_rollup_rejects_bare_string_group_by(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        query_rollup(group_by="project", db_path=tmp_path / "l.db")
+
+def test_default_db_ignores_empty_env(monkeypatch):
+    from pathlib import Path
+    from venice_usage.ledger import default_db
+    monkeypatch.setenv("VENICE_USAGE_DB", "")
+    assert default_db() == Path.home() / ".local/state/venice-usage/ledger.db"
