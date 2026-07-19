@@ -120,6 +120,15 @@ def test_auto_timestamp_is_iso_utc_second_precision(tmp_path):
     append(project="p", task_type="t", model="m", db_path=db)  # ts omitted -> _utcnow_iso()
     ts = connect(db).execute("SELECT ts FROM usage").fetchone()[0]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts)  # UTC, second precision, no offset
+    from datetime import datetime, timezone
+    got = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - got).total_seconds()) < 10  # actually UTC-now, not local
+
+def test_default_db_ignores_empty_env(monkeypatch):
+    from pathlib import Path
+    from venice_usage.ledger import default_db
+    monkeypatch.setenv("VENICE_USAGE_DB", "")
+    assert default_db() == Path.home() / ".local/state/venice-usage/ledger.db"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -141,8 +150,11 @@ from pathlib import Path
 def default_db() -> Path:
     # Resolved at CALL time (not import) so $VENICE_USAGE_DB set later — e.g. by a
     # test's monkeypatch.setenv — is honored. No import-time snapshot to go stale.
-    return Path(os.environ.get(
-        "VENICE_USAGE_DB", str(Path.home() / ".local/state/venice-usage/ledger.db")))
+    # An empty (set-but-blank) value falls back to the default, not Path("") -> ".".
+    env = os.environ.get("VENICE_USAGE_DB")
+    if env:
+        return Path(env)
+    return Path.home() / ".local/state/venice-usage/ledger.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -323,6 +335,16 @@ def test_rollup_rejects_bad_group_by(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         query_rollup(group_by=("project; DROP TABLE usage",), db_path=tmp_path / "l.db")
+
+def test_rollup_rejects_empty_group_by(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        query_rollup(group_by=(), db_path=tmp_path / "l.db")
+
+def test_rollup_rejects_bare_string_group_by(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        query_rollup(group_by="project", db_path=tmp_path / "l.db")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -338,7 +360,11 @@ _GROUP_COLS = {"project", "task_type", "model", "source"}
 
 def query_rollup(*, since=None, until=None, project=None,
                  group_by=("project", "task_type"), db_path=None) -> list[dict]:
+    if isinstance(group_by, str):
+        raise ValueError("group_by must be a sequence of columns, not a string")
     group_by = tuple(group_by)
+    if not group_by:
+        raise ValueError("group_by must name at least one column")
     bad = [c for c in group_by if c not in _GROUP_COLS]
     if bad:
         raise ValueError(f"invalid group_by column(s): {bad}")
@@ -577,6 +603,8 @@ After this branch merges to `main`, run `pipx reinstall council` (or `pipx insta
 ## Phase B — Reconciler (`diem venice-usage`)
 
 Depends on Phase A (imports `venice_usage.query_rollup`). Adds the admin key + Venice per-key usage cross-check where the admin key belongs.
+
+> **From the Phase A review — carry into B:** (1) the ledger's `ts` is **naive UTC, second precision** (no offset), chosen for lexicographic `since`/`until` comparison — keep diem's `since`/`until` strings in that exact format or `ts >= ?` silently mis-filters. (2) Phase C call-sites discard the CLI's stderr, so a systemic logging breakage is invisible until reconcile — B's reconcile should explicitly flag projects where **ledger total is 0 but Venice usage > 0** (uncovered/broken), not just numeric deltas.
 
 ### Task B1: Wire `VENICE_ADMIN_KEY` into diem config
 
@@ -910,6 +938,8 @@ git commit -m "feat(diem): venice-usage reconcile subcommand"
 ## Phase C — Instrumentation rollout
 
 Wire each call-site to append exactly one row per call. **The ledger append is already tested (Phase A); Phase C is wiring + a per-site verification**, not new logic. Do sites in the order below (highest coverage first). Each site is its own commit.
+
+> **Deploy prerequisite (from the Phase A review):** provision the default ledger dir `~/.local/state/venice-usage/` with correct ownership/permissions at deploy time — call-sites discard stderr, so a bad-perms DB dir would silently drop every row until Phase B reconcile catches it. Also do the post-merge `pipx` install (Task A5 Step 2) so `venice-usage` is on PATH before instrumenting shell/Node sites.
 
 ### The instrumentation recipe (per language)
 
