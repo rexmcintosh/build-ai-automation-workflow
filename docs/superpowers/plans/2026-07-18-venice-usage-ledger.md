@@ -28,8 +28,10 @@
 
 **Recommended (baked into this plan — flag now if you disagree):**
 - **D3 — One universal append CLI.** `venice-usage log …`. Rationale: pipx isolates the `council` venv, so external projects can't `import venice_usage`; there's no `sqlite3` CLI on the box and Node 22's SQLite is experimental. A single Python CLI on PATH is the only uniform, low-dep write path across all 3 languages. In-monorepo callers (council, loom, diem) import `venice_usage.append()` directly.
-- **D4 — Reconcile source = Venice per-key trailing-7-day usage** (via `/api/v1/api_keys`), compared to the ledger's 7-day per-project totals. Venice's public docs don't expose a clean historical `/billing/usage` endpoint; the per-key trailing-7d figure (USD/VCU/DIEM) is the authoritative cross-check. The client is built defensively (like `BalanceClient`) and the exact response shape is confirmed at Task B2.
-- **D5 — Key→project mapping by naming convention.** When minting, name each per-project key `proj-<project>` (e.g. `proj-romance`). Reconcile maps Venice keys→projects by that prefix — no extra config file. DEFAULT/CI keys map to `default`/`ci` and are shown but not per-project-reconciled.
+- **D4 — Reconcile source = Venice per-key trailing-7-day usage** (via `/api/v1/api_keys`), compared to the ledger's 7-day per-project totals. Venice's public docs don't expose a clean historical `/billing/usage` endpoint; the per-key trailing-7d figure (USD/VCU/DIEM) is the authoritative cross-check. The client is built defensively (like `BalanceClient`); the response shape was **confirmed live on 2026-07-19** — `data[].usage.trailingSevenDays.{usd,vcu,diem}` (as strings), keyed by `description`, with `consumptionLimits` (caps) and `currentPeriodUsage` also available. This unknown is now closed.
+- **D5 — Key→project mapping by naming convention.** Reconcile maps a Venice key to a project by its `description`: a `proj-<project>` prefix is stripped, otherwise the name is used as-is. No extra config file.
+  **Live reality (observed 2026-07-19, 13 keys on the account):** existing keys are named `ADMIN`, `CI`, `DEFAULT`, `romance-empire`, `Swimtrack`, `swimtrack_coach`, `SwimTrack-Images`, `AI-Council`, `Claude Code`, `GameBuilding`, `MacWhisper`, `OpenClaw`, `n8n` — none use a `proj-` prefix, and several belong to **off-box** consumers (MacWhisper/OpenClaw/n8n/Claude Code) not documented in the secrets map.
+  ⚠️ **Harmonization is required for reconcile to align:** the key `description` must equal the `project` tag the ledger writes. Planned ledger tags (`romance`, `swimtrack`, `swimtrack-coach`, `swimtrack-website`, …) do **not** match today's key names (`romance-empire`, `Swimtrack`, `swimtrack_coach`). Phase D must pick one and apply it consistently — either rename the Venice keys to the ledger tags (or `proj-<tag>`), or choose ledger tags that match the key names. Off-box and non-project keys (ADMIN/CI/DEFAULT/MacWhisper/…) simply show up unmatched, which is correct and harmless.
 - **D6 — diem gains `VENICE_ADMIN_KEY`.** diem does not read it today (grep-confirmed); Task B1 wires it (`load_venice_admin_key()` reading `~/.env`). The balance probe keeps using the inference key.
 
 **Known deltas from the brief (reality wins):**
@@ -695,7 +697,9 @@ git commit -m "feat(diem): load_venice_admin_key + shared _read_env"
 **Interfaces:**
 - Produces: `UsageClient(admin_key: str, *, get=None, timeout: int = 30)`; `.per_key_usage() -> list[dict]` where each dict has `key_id: str`, `key_name: str`, `usd: float`, `diem: float` (trailing-7d). `UsageUnavailable(RuntimeError)`.
 - Mirrors `BalanceClient` exactly: injectable `get`, `Authorization: Bearer`, dedicated exception, defensive envelope parsing.
-- **Endpoint confirmation:** at implementation, confirm the list-keys path + response shape from Venice docs (`GET /api/v1/api_keys`; per-key `consumptionLimits`/`usage` with trailing-7d `usd`/`diem`/`vcu`). Parse both `data`-wrapped and top-level shapes (as `BalanceClient` does). If the shape differs, adjust the extraction in `_parse_keys` only — the interface above stays fixed.
+- **Endpoint shape — CONFIRMED LIVE 2026-07-19** (read-only probe with the admin key; structure only, no values recorded). `GET /api/v1/api_keys` returns:
+  `{"object": str, "data": [ … ]}` — each item has `id: str`, **`description: str`** (the key's name — this is the field the `proj-<project>` convention maps on), `last6Chars`, `apiKeyType`, `limitPeriod`, `lastUsedAt`, `expiresAt`, `consumptionLimits: {usd, vcu, diem}` (the per-key caps), `currentPeriodUsage: {usd: str, diem: str}`, and `usage: {trailingSevenDays: {usd: str, vcu: str, diem: str}}`.
+  **The amounts are STRINGS** — the `float(...)` coercion below is required, not merely defensive. Keep the `data`-or-top-level envelope tolerance anyway (mirrors `BalanceClient`). `currentPeriodUsage` is available as an alternative window if the 7-day one proves awkward; `consumptionLimits` exposes the caps if we later want to surface headroom.
 
 - [ ] **Step 1: Write the failing test** (uses the documented shape via a fake `get`)
 
@@ -795,7 +799,10 @@ class UsageClient:
                     "usd": float(seven.get("usd") or 0.0),
                     "diem": float(seven.get("diem") or 0.0),
                 })
-            except (TypeError, ValueError) as e:
+            except Exception as e:  # noqa: BLE001 — ANY per-item parse failure must
+                # surface as UsageUnavailable. Note a non-dict item in `data` raises
+                # AttributeError from it.get(...), which a narrow (TypeError, ValueError)
+                # would let escape unwrapped, violating the contract above.
                 raise UsageUnavailable(f"unparseable key row: {e}") from e
         return out
 ```

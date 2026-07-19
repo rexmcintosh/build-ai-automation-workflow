@@ -134,11 +134,11 @@ class DiemConfig:
         return cls(**kw)
 
 
-def load_venice_key(env_path: Path = Path.home() / ".env") -> str:
+def _read_env(env_path: Path) -> dict[str, str]:
     try:
         lines = Path(env_path).read_text().splitlines()
     except OSError:
-        lines = []
+        return {}
     found = {}
     for line in lines:
         line = line.strip()
@@ -148,9 +148,22 @@ def load_venice_key(env_path: Path = Path.home() / ".env") -> str:
             continue
         name, _, val = line.partition("=")
         found[name.strip()] = val.strip().strip("'\"")
+    return found
+
+
+def load_venice_key(env_path: Path = Path.home() / ".env") -> str:
+    found = _read_env(env_path)
     for name in ("VENICE_API_KEY", "VENICE_KEY"):
         if found.get(name):
             return found[name]
     print(f"error: neither VENICE_API_KEY nor VENICE_KEY found in {env_path}",
           file=sys.stderr)
+    raise SystemExit(2)
+
+
+def load_venice_admin_key(env_path: Path = Path.home() / ".env") -> str:
+    found = _read_env(env_path)
+    if found.get("VENICE_ADMIN_KEY"):
+        return found["VENICE_ADMIN_KEY"]
+    print(f"error: VENICE_ADMIN_KEY not found in {env_path}", file=sys.stderr)
     raise SystemExit(2)
