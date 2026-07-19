@@ -175,3 +175,33 @@ def test_morning_report_fires_with_midnight_reset(tmp_path, monkeypatch):
     cli.main(["drain", "--checkpoint", "--config", str(p)])       # last cp (23:45) → report
     assert (tmp_path / "state" / "reports" / "2026-07-03.md").exists()
     assert len(sent) == 2 and "Report" in sent[1]
+
+
+def test_venice_usage_reconciles_ledger_vs_venice(tmp_path, monkeypatch, capsys):
+    cfgp = _cfg_file(tmp_path)
+    db = tmp_path / "ledger.db"; monkeypatch.setenv("VENICE_USAGE_DB", str(db))
+    from venice_usage.ledger import append
+    append(project="romance", task_type="draft", model="m", usd=1.00,
+           ts="2026-07-18T02:00:00", db_path=db)
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 18, 12, 0))
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+    class FakeUsage:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "k1", "key_name": "proj-romance", "usd": 1.10, "diem": 4.0}]
+    monkeypatch.setattr(cli, "UsageClient", FakeUsage)
+    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0
+    out = capsys.readouterr().out
+    assert "romance" in out and "1.00" in out and "1.10" in out  # ledger vs venice
+
+def test_venice_usage_degrades_when_venice_unavailable(tmp_path, monkeypatch, capsys):
+    cfgp = _cfg_file(tmp_path)
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "ledger.db"))
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+    from diem.usage import UsageUnavailable
+    class Down:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self): raise UsageUnavailable("down")
+    monkeypatch.setattr(cli, "UsageClient", Down)
+    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # still exits 0
+    assert "unavailable" in capsys.readouterr().out.lower()

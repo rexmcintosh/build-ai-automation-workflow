@@ -9,13 +9,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import venice_usage
+
 from .balance import BalanceClient, BalanceUnavailable
-from .config import DiemConfig, load_venice_key
+from .config import DiemConfig, load_venice_key, load_venice_admin_key
 from .drain import _last_fired, floor_for, next_deadline, next_reset, run_checkpoint
 from .queue import QueueDir, new_item
 from .report import evening_ping, send_telegram, write_morning_report
 from .runners import run_item
 from .state import Estimates, Reviewed, clear_pause, set_pause
+from .usage import UsageClient, UsageUnavailable
 from .queue import Item  # noqa: F401 (re-export convenience for sessions)
 
 
@@ -108,6 +111,43 @@ def _cmd_status(cfg, now: datetime) -> int:
     return 0
 
 
+def _cmd_venice_usage(cfg, now, *, days=7, as_json=False) -> int:
+    since = (now - timedelta(days=days)).isoformat(timespec="seconds")
+    ledger = {r["project"]: r["usd"]
+              for r in venice_usage.query_rollup(since=since, group_by=("project",))}
+    venice = {}
+    warn = None
+    try:
+        for k in UsageClient(load_venice_admin_key()).per_key_usage():
+            name = k["key_name"]
+            proj = name[len("proj-"):] if name.startswith("proj-") else name
+            venice[proj] = venice.get(proj, 0.0) + k["usd"]
+    except (UsageUnavailable, SystemExit) as e:
+        warn = str(e) or "venice usage unavailable"
+    projects = sorted(set(ledger) | set(venice))
+    rows = []
+    for p in projects:
+        lu, vu = ledger.get(p), venice.get(p)
+        note = "" if (lu is not None and vu is not None) else \
+               ("uncovered" if lu is None else "no key")
+        rows.append({"project": p, "ledger_usd": round(lu or 0.0, 4),
+                     "venice_usd": None if vu is None else round(vu, 4),
+                     "delta": None if (lu is None or vu is None) else round((vu - lu), 4),
+                     "note": note})
+    if as_json:
+        print(json.dumps({"days": days, "warning": warn, "rows": rows}, indent=1))
+        return 0
+    if warn:
+        print(f"warning: Venice usage unavailable ({warn}) — showing ledger only")
+    print(f"venice-usage reconcile (last {days}d)")
+    print(f"{'project':16} {'ledger$':>9} {'venice$':>9} {'delta$':>9}  note")
+    for r in rows:
+        vu = "-" if r["venice_usd"] is None else f"{r['venice_usd']:.4f}"
+        dl = "-" if r["delta"] is None else f"{r['delta']:+.4f}"
+        print(f"{r['project']:16} {r['ledger_usd']:9.4f} {vu:>9} {dl:>9}  {r['note']}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="diem")
     p.add_argument("--config", default=None)
@@ -118,6 +158,9 @@ def main(argv=None) -> int:
     d.add_argument("--config", default=None)
 
     st = sub.add_parser("status"); st.add_argument("--config", default=None)
+
+    vu = sub.add_parser("venice-usage"); vu.add_argument("--config", default=None)
+    vu.add_argument("--days", type=int, default=7); vu.add_argument("--json", action="store_true")
 
     qp = sub.add_parser("queue"); qsub = qp.add_subparsers(dest="qcmd", required=True)
     qa = qsub.add_parser("add"); qa.add_argument("--config", default=None)
@@ -141,6 +184,8 @@ def main(argv=None) -> int:
         return _cmd_drain(cfg, now)
     if args.cmd == "status":
         return _cmd_status(cfg, now)
+    if args.cmd == "venice-usage":
+        return _cmd_venice_usage(cfg, now, days=args.days, as_json=args.json)
     if args.cmd == "queue":
         q, _, _ = _bits(cfg)
         if args.qcmd == "add":
