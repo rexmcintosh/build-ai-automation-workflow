@@ -2,10 +2,14 @@ import pytest
 from council.venice import VeniceClient, VeniceError
 
 
-def _resp(content, status=200):
+def _resp(content, status=200, usage=None):
+    body = {"choices": [{"message": {"content": content}}]}
+    if usage is not None:
+        body["usage"] = usage
+
     class R:
         status_code = status
-        def json(self): return {"choices": [{"message": {"content": content}}]}
+        def json(self): return body
         def raise_for_status(self):
             if status >= 400:
                 raise RuntimeError(f"HTTP {status}")
@@ -69,3 +73,88 @@ def test_complete_retries_on_5xx():
     with pytest.raises(VeniceError):
         c.complete("m", "s", "u")
     assert attempts["n"] == 3  # 503 is retryable
+
+
+# --- usage-ledger instrumentation (Phase C) ---------------------------------
+
+def _last_usage_row(db_path):
+    import venice_usage
+    row = venice_usage.connect(db_path).execute(
+        "SELECT project, task_type, model, tokens_in, tokens_out, source "
+        "FROM usage ORDER BY id DESC LIMIT 1").fetchone()
+    return row
+
+
+def test_complete_logs_one_usage_row_with_expected_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    def fake_post(url, **kw):
+        return _resp("hi", usage={"prompt_tokens": 123, "completion_tokens": 45})
+    c = VeniceClient(api_key="k", post=fake_post)
+    c.complete("model-x", "sys", "usr", task_type="ask")
+    row = _last_usage_row(tmp_path / "l.db")
+    assert row == ("council", "ask", "model-x", 123, 45, "council/venice")
+
+
+def test_complete_defaults_task_type_to_chat(tmp_path, monkeypatch):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    def fake_post(url, **kw):
+        return _resp("hi", usage={"prompt_tokens": 10, "completion_tokens": 5})
+    c = VeniceClient(api_key="k", post=fake_post)
+    c.complete("model-x", "sys", "usr")  # task_type omitted
+    row = _last_usage_row(tmp_path / "l.db")
+    assert row[1] == "chat"
+
+
+def test_complete_logs_zero_tokens_when_usage_missing(tmp_path, monkeypatch):
+    # Not every response envelope includes a `usage` block — must not raise,
+    # and must degrade to 0/0 rather than skip the row.
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    def fake_post(url, **kw):
+        return _resp("hi")  # no usage=... passed
+    c = VeniceClient(api_key="k", post=fake_post)
+    out = c.complete("model-x", "sys", "usr", task_type="review")
+    assert out == "hi"
+    row = _last_usage_row(tmp_path / "l.db")
+    assert row == ("council", "review", "model-x", 0, 0, "council/venice")
+
+
+def test_complete_appends_exactly_one_row_per_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "l.db"))
+    def fake_post(url, **kw):
+        return _resp("hi", usage={"prompt_tokens": 1, "completion_tokens": 1})
+    c = VeniceClient(api_key="k", post=fake_post)
+    c.complete("m", "s", "u")
+    c.complete("m", "s", "u")
+    import venice_usage
+    n = venice_usage.connect(tmp_path / "l.db").execute(
+        "SELECT count(*) FROM usage").fetchone()[0]
+    assert n == 2
+
+
+def test_complete_logging_failure_does_not_propagate(tmp_path, monkeypatch):
+    # A broken ledger (raises on append) must be completely invisible to the caller —
+    # complete() still returns the content normally.
+    import venice_usage
+    def boom(*a, **k):
+        raise RuntimeError("ledger is on fire")
+    monkeypatch.setattr(venice_usage, "append", boom)
+    def fake_post(url, **kw):
+        return _resp("still works", usage={"prompt_tokens": 1, "completion_tokens": 1})
+    c = VeniceClient(api_key="k", post=fake_post)
+    out = c.complete("m", "s", "u")
+    assert out == "still works"
+
+
+def test_complete_logging_survives_missing_venice_usage_package(tmp_path, monkeypatch):
+    # If the package itself can't be imported, the call must still succeed.
+    import builtins
+    real_import = builtins.__import__
+    def fake_import(name, *a, **k):
+        if name == "venice_usage":
+            raise ImportError("no such package")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    def fake_post(url, **kw):
+        return _resp("ok", usage={"prompt_tokens": 1, "completion_tokens": 1})
+    c = VeniceClient(api_key="k", post=fake_post)
+    assert c.complete("m", "s", "u") == "ok"

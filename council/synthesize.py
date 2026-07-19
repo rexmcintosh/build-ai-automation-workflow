@@ -29,12 +29,12 @@ def _panel_digest(results: list[MemberResult]) -> str:
 
 
 def synthesize(context: str, results: list[MemberResult], client, *, chair_model: str,
-               system: str = SYNTH_OUTPUT) -> Synthesis:
+               system: str = SYNTH_OUTPUT, task_type: str = "chat") -> Synthesis:
     user = (f"ORIGINAL INPUT:\n{context}\n\n"
             f"PANELIST ANSWERS (they answered independently, blind to each other):\n"
             f"{_panel_digest(results)}")
     try:
-        raw = client.complete(chair_model, system, user)
+        raw = client.complete(chair_model, system, user, task_type=task_type)
         d = loads_lenient(raw)
         dis = [Disagreement(
             topic=str(x.get("topic", "")), type=str(x.get("type", "taste")),

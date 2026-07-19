@@ -70,19 +70,19 @@ def _read_for_review(path_arg: str, cap: int) -> str:
     return "\n\n".join(parts)
 
 
-def _run(context, panel_name, settings, panels, client, rigor, fmt):
+def _run(context, panel_name, settings, panels, client, rigor, fmt, *, task_type="chat"):
     if panel_name is None:
         panel_name = pick_panel(context, panels, client,
                                 router_model=settings.router_model,
-                                default=settings.default_panel)
+                                default=settings.default_panel, task_type=task_type)
     if panel_name not in panels:
         print(f"error: unknown panel '{panel_name}'. Available: "
               f"{', '.join(panels)}.", file=sys.stderr)
         raise SystemExit(2)
     panel = panels[panel_name]
     rigor = rigor or panel.default_rigor
-    results = run_panel(panel, context, client)
-    syn = synthesize(context, results, client, chair_model=settings.chair_model)
+    results = run_panel(panel, context, client, task_type=task_type)
+    syn = synthesize(context, results, client, chair_model=settings.chair_model, task_type=task_type)
     render = render_markdown if fmt == "md" else render_terminal
     print(f"[panel: {panel_name} · rigor: {rigor}]\n")
     print(render(context[:120], syn, results, rigor=rigor))
@@ -140,7 +140,8 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
 
     if args.cmd == "ask":
         ctx = _gather_context(args.question, args.file, settings.byte_cap)
-        return _run(ctx, args.panel, settings, panels, client, args.rigor, args.format)
+        return _run(ctx, args.panel, settings, panels, client, args.rigor, args.format,
+                    task_type="ask")
 
     if args.cmd == "review":
         import subprocess

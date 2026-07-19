@@ -12,8 +12,9 @@ class FakeClient:
         self.raises_for = raises_for or set()
         self.calls = []
 
-    def complete(self, model, system, user, *, json_mode=True):
-        self.calls.append({"model": model, "system": system, "user": user})
+    def complete(self, model, system, user, *, json_mode=True, task_type="chat"):
+        self.calls.append({"model": model, "system": system, "user": user,
+                           "task_type": task_type})
         if model in self.raises_for:
             raise RuntimeError(f"boom:{model}")
         payload = self.by_model.get(model, self.default)

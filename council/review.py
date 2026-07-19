@@ -42,9 +42,9 @@ def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_con
 
     if code_diff.strip():
         ctx = _code_context(code_diff, file_context)
-        results = run_panel(panels["code-review"], ctx, client)
-        syn = synthesize(ctx, results, client,
-                         chair_model=chair_model, system=REVIEW_SYNTH_OUTPUT)
+        results = run_panel(panels["code-review"], ctx, client, task_type="review")
+        syn = synthesize(ctx, results, client, chair_model=chair_model,
+                         system=REVIEW_SYNTH_OUTPUT, task_type="review")
         sections.append(("Code review (gate)", "", "Code changes", syn, results))
         tier = risk_tier(changed_paths(code_diff))
         blocking = decide_blocking(results, syn, tier=tier)
@@ -54,8 +54,9 @@ def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_con
     if doc_diff.strip():
         results = run_panel(
             panels["spec-review"],
-            f"Review this design doc / spec / plan diff:\n\n```diff\n{doc_diff}\n```", client)
-        syn = synthesize("Doc review", results, client, chair_model=chair_model)
+            f"Review this design doc / spec / plan diff:\n\n```diff\n{doc_diff}\n```", client,
+            task_type="review")
+        syn = synthesize("Doc review", results, client, chair_model=chair_model, task_type="review")
         sections.append(("Docs review (advisory)",
                          "Advisory only — does not affect the merge check.",
                          "Doc changes", syn, results))

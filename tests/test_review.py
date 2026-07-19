@@ -130,3 +130,16 @@ def test_doc_panel_outage_does_not_block(member_json):
 def test_empty_diff_is_noop():
     body, blocking, unavailable = run_pr_review("", _panels(), FakeClient(), chair_model="c")
     assert blocking == 0 and unavailable is False
+
+
+def test_run_pr_review_forwards_task_type_review(member_json):
+    # council/review.py's PR-review path must thread task_type="review" down to
+    # every complete() call (both panels + both chairs) for accurate usage logging.
+    client = FakeClient(by_model={
+        "code1": member_json(stance="approve", headline="ok"),
+        "doc1": member_json(stance="approve", headline="ok"),
+        "c": _chair(),
+    })
+    run_pr_review(CODE + DOC, _panels(), client, chair_model="c")
+    assert client.calls  # sanity: calls actually happened
+    assert all(c["task_type"] == "review" for c in client.calls)
