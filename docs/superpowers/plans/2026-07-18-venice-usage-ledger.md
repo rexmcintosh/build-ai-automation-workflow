@@ -797,7 +797,10 @@ class UsageClient:
                     "usd": float(seven.get("usd") or 0.0),
                     "diem": float(seven.get("diem") or 0.0),
                 })
-            except (TypeError, ValueError) as e:
+            except Exception as e:  # noqa: BLE001 — ANY per-item parse failure must
+                # surface as UsageUnavailable. Note a non-dict item in `data` raises
+                # AttributeError from it.get(...), which a narrow (TypeError, ValueError)
+                # would let escape unwrapped, violating the contract above.
                 raise UsageUnavailable(f"unparseable key row: {e}") from e
         return out
 ```
