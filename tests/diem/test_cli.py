@@ -205,3 +205,34 @@ def test_venice_usage_degrades_when_venice_unavailable(tmp_path, monkeypatch, ca
     monkeypatch.setattr(cli, "UsageClient", Down)
     assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # still exits 0
     assert "unavailable" in capsys.readouterr().out.lower()
+
+def test_venice_usage_flags_coverage_gaps(tmp_path, monkeypatch, capsys):
+    cfgp = _cfg_file(tmp_path)
+    db = tmp_path / "ledger.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(db))
+    from venice_usage.ledger import append
+    append(project="romance", task_type="draft", model="m", usd=1.00,
+           ts="2026-07-18T02:00:00", db_path=db)          # ledger rows, but no Venice key
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 18, 12, 0))
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+
+    class FakeUsage:                                       # Venice usage, but no ledger rows
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "k9", "key_name": "proj-ghost", "usd": 2.50, "diem": 1.0}]
+    monkeypatch.setattr(cli, "UsageClient", FakeUsage)
+
+    assert cli.main(["venice-usage", "--json", "--config", str(cfgp)]) == 0
+    rows = {r["project"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
+    assert rows["romance"]["note"] == "no key"     # ledger row, no matching key
+    assert rows["ghost"]["note"] == "uncovered"    # key usage, no ledger row (broken call-site)
+
+def test_venice_usage_degrades_when_admin_key_missing(tmp_path, monkeypatch, capsys):
+    cfgp = _cfg_file(tmp_path)
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "ledger.db"))
+
+    def boom():
+        raise SystemExit(2)                                # load_venice_admin_key when key absent
+    monkeypatch.setattr(cli, "load_venice_admin_key", boom)
+    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # must never hard-fail
+    assert "unavailable" in capsys.readouterr().out.lower()
