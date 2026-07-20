@@ -2,7 +2,13 @@
 """Weave one target file's bundle of learnings. The SCRIPT does all I/O and all
 fingerprinting; the model only returns prose. Flow: dedup -> model -> stamp
 fingerprints -> scoped shape-lints + all-routes sentinel -> bisect-on-fail ->
-commit (trailer + empty-diff skip). Returns {'committed': [...], 'rejected': [...]}."""
+commit (trailer + empty-diff skip). Returns {'committed': [...], 'quarantined': [...]}.
+
+A guard failure QUARANTINES rather than discards: the weave must not reach
+loom-shadow unreviewed, but the learning is kept and surfaced for a human
+decision. Quarantine is settled, so a deterministic guard (e.g. the sentinel's
+priv-write pattern matching legitimate `authorized_keys` documentation) cannot
+re-trip every run and burn DIEM forever."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -62,22 +68,22 @@ def _try_bundle(backend, before: str, directory: str, target: str, bundle: List[
 def weave_target(backend, repo, ledger, target: str, directory: str,
                  bundle: List[dict], today: str) -> Dict[str, List[str]]:
     # `today` is accepted for caller-signature parity (run.py); index date-stamping lives in run.py.
-    result = {"committed": [], "rejected": []}
+    result = {"committed": [], "quarantined": []}
     before = repo.read(target) or ""
     present = markers_in(before) | repo.committed_ids()
 
     # Dedup: drop learnings already woven into this target / committed anywhere.
     fresh = [b for b in bundle if b["id"] not in present]
     for b in bundle:
-        if b["id"] in present and ledger.status_of(b["id"]) != "rejected":
+        if b["id"] in present and ledger.status_of(b["id"]) not in ("rejected", "quarantined"):
             ledger.mark(b["id"], "committed")
             result["committed"].append(b["id"])
     if not fresh:
         return result
 
-    committed, rejected = _weave_recursive(backend, repo, ledger, target, directory, before, fresh)
+    committed, quarantined = _weave_recursive(backend, repo, ledger, target, directory, before, fresh)
     result["committed"].extend(committed)
-    result["rejected"].extend(rejected)
+    result["quarantined"].extend(quarantined)
     return result
 
 
@@ -93,7 +99,7 @@ def _weave_recursive(backend, repo, ledger, target, directory, before, bundle):
             ledger.mark(b["id"], "committed", commit_sha=sha)
         return ids, []
     if len(bundle) == 1:
-        ledger.reject(bundle[0]["id"], "weave failed guards after retry")
+        ledger.quarantine(bundle[0]["id"], "weave failed guards after retry")
         return [], [bundle[0]["id"]]
     mid = len(bundle) // 2
     # Re-read `before` fresh each half: the first half may have committed.
