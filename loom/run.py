@@ -66,9 +66,11 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
     quarantine_dir = cfg.loom_dir / "quarantine"
+    # "quarantined" = SESSIONS whose transcript failed the secret gate.
+    # "quarantined_learnings" = individual learnings whose weave failed a guard.
     summary = {"distilled": 0, "quarantined": 0, "failed": 0,
-               "committed": 0, "deferred": 0, "rejected": 0, "deadline_hit": False,
-               "limit_hit": False}
+               "committed": 0, "deferred": 0, "quarantined_learnings": 0,
+               "deadline_hit": False, "limit_hit": False}
 
     start = time.monotonic()
     def _expired() -> bool:
@@ -160,7 +162,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
         for idx, learning in enumerate(items):
             lid = learning_id(sid, idx)
             ids_here.append(lid)
-            if ledger.status_of(lid) in ("committed", "rejected"):
+            if ledger.status_of(lid) in ("committed", "rejected", "quarantined"):
                 continue
             cached = ledger.entry(lid)
             if cached.get("target"):              # routed in a prior run — reuse, no model call
@@ -204,7 +206,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
                 summary["deferred"] += 1
             continue
         summary["committed"] += len(res["committed"])
-        summary["rejected"] += len(res["rejected"])
+        summary["quarantined_learnings"] += len(res["quarantined"])
         if res["committed"]:
             slug = Path(target).stem
             committed_set = set(res["committed"])
@@ -220,14 +222,16 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
 
     for sid, ids in session_learnings.items():
         statuses = [ledger.status_of(i) for i in ids]
-        if all(s in ("committed", "rejected") for s in statuses):
+        if all(s in ("committed", "rejected", "quarantined") for s in statuses):
             state.advance(sid, "committed")
         # 'weaved' is reachable only if a future change separates write from commit; today commit_file is atomic so learnings go planned->committed directly.
-        elif all(s in ("committed", "rejected", "woven") for s in statuses):
+        elif all(s in ("committed", "rejected", "quarantined", "woven") for s in statuses):
             state.advance(sid, "weaved")
         # else stays distilled
 
-    summary["rejected_items"] = ledger.rejected()
+    # Surface both: legacy permanent rejects (pre-quarantine) and the new
+    # quarantined learnings awaiting review.
+    summary["quarantined_items"] = ledger.quarantined() + ledger.rejected()
     summary["shadow_commits"] = repo.commits_since()
     oldest = repo.oldest_unpromoted_epoch()
     summary["oldest_age_days"] = int((time.time() - oldest) / 86400) if oldest else 0
