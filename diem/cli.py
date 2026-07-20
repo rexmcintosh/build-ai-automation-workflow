@@ -12,7 +12,7 @@ from pathlib import Path
 import venice_usage
 
 from .balance import BalanceClient, BalanceUnavailable
-from .config import DiemConfig, load_venice_key, load_venice_admin_key
+from .config import DiemConfig, load_venice_key, load_venice_admin_key, _read_env
 from .drain import _last_fired, floor_for, next_deadline, next_reset, run_checkpoint
 from .queue import QueueDir, new_item
 from .report import evening_ping, send_telegram, write_morning_report
@@ -39,12 +39,25 @@ def _diem_day(cfg, now: datetime) -> str:
     return (next_reset(cfg, now) - timedelta(days=1)).date().isoformat()
 
 
-def _drain_env(key: str) -> dict:
-    """Env for shelled-out subprocesses (council/loom/cmd). Cron's PATH is
-    just /usr/bin:/bin, so a bare `council` argv is unresolvable unless
-    pipx's bin dir is on it — prepend it, without duplicating an entry
-    that's already there."""
-    env = {**os.environ, "VENICE_API_KEY": key, "VENICE_KEY": key}
+def _drain_env(key: str, env_path: Path = Path.home() / ".env") -> dict:
+    """Env for shelled-out subprocesses (council/loom/cmd). Cron runs this
+    under /bin/sh, so ~/.zshenv never fires and ~/.env is never sourced —
+    os.environ has no VENICE_* at all. Read them directly and pass the
+    per-project keys through, or every queued subprocess falls back to the
+    shared key and bills to DEFAULT instead of its own project.
+
+    Cron's PATH is also just /usr/bin:/bin, so a bare `council` argv is
+    unresolvable unless pipx's bin dir is on it — prepend it, without
+    duplicating an entry that's already there."""
+    env = {**os.environ}
+    for name, value in _read_env(env_path).items():
+        if name.startswith("VENICE_"):
+            env[name] = value
+    # Generic names are the fallback tier, not an override: VENICE_KEY is
+    # romance's var under the per-project map and must not be clobbered when
+    # ~/.env defines it.
+    env.setdefault("VENICE_API_KEY", key)
+    env.setdefault("VENICE_KEY", key)
     pipx_bin = str(Path.home() / ".local" / "bin")
     path = env.get("PATH", "/usr/bin:/bin")
     if pipx_bin not in path.split(":"):
