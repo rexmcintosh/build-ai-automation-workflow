@@ -18,13 +18,21 @@ class Settings:
     timeout: int = 180
 
 
+# One Venice key per project, so per-key billing attributes spend correctly.
+# The generic VENICE_API_KEY stays as a fallback: it is what `~/.env` puts in
+# every shell, so this code is safe to deploy before the council key exists.
+_KEY_VARS = ("VENICE_COUNCIL_KEY", "VENICE_API_KEY")
+
+
 def get_api_key() -> str:
-    key = os.environ.get("VENICE_API_KEY")
-    if not key:
-        print("error: VENICE_API_KEY is not set. Add it to your environment or .env "
-              "(see .env.example).", file=sys.stderr)
-        raise SystemExit(2)
-    return key
+    for name in _KEY_VARS:
+        key = os.environ.get(name)
+        if key:
+            return key
+    print("error: no Venice key set. Add VENICE_COUNCIL_KEY (preferred) or "
+          "VENICE_API_KEY to your environment or .env (see .env.example).",
+          file=sys.stderr)
+    raise SystemExit(2)
 
 
 def _panels_path(path=None) -> Path:

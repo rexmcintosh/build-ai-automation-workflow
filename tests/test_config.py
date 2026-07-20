@@ -54,3 +54,29 @@ def test_real_panels_include_spec_review():
     assert [m.name for m in p.members] == [
         "Editor", "Domain Skeptic", "Implementer", "Pre-mortem Adversary"]
     assert all(m.model and m.system for m in p.members)  # no empty models/personas
+
+
+def test_get_api_key_prefers_the_council_key(monkeypatch):
+    monkeypatch.setenv("VENICE_COUNCIL_KEY", "council-key")
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert get_api_key() == "council-key"
+
+
+def test_get_api_key_falls_back_to_the_shared_key(monkeypatch):
+    monkeypatch.delenv("VENICE_COUNCIL_KEY", raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert get_api_key() == "default-key"
+
+
+def test_get_api_key_treats_blank_as_unset(monkeypatch):
+    # A set-but-empty var must fall through, not be returned as a valid key.
+    monkeypatch.setenv("VENICE_COUNCIL_KEY", "")
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert get_api_key() == "default-key"
+
+
+def test_get_api_key_exits_when_neither_is_set(monkeypatch):
+    monkeypatch.delenv("VENICE_COUNCIL_KEY", raising=False)
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    with pytest.raises(SystemExit):
+        get_api_key()
