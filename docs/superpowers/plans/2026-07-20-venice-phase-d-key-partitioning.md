@@ -228,7 +228,7 @@ git commit -m "feat(venice-keys): loom reads VENICE_LOOM_KEY, falls back to shar
 
 **Files:**
 - Modify: `diem/cli.py:114-148` (`_cmd_venice_usage`)
-- Test: `tests/diem/test_cli_venice_usage.py`
+- Test: `tests/diem/test_cli.py`
 
 **Interfaces:**
 - Consumes: `UsageClient.per_key_usage() -> list[dict]` with keys `key_id`, `key_name`, `usd`, `diem` (already built in Phase B — `diem/usage.py:45-46`).
@@ -238,7 +238,7 @@ git commit -m "feat(venice-keys): loom reads VENICE_LOOM_KEY, falls back to shar
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/diem/test_cli_venice_usage.py`:
+Append to `tests/diem/test_cli.py` (the existing diem CLI test module):
 
 ```python
 def test_rows_report_diem_and_have_no_delta(monkeypatch, capsys, tmp_path):
@@ -285,7 +285,7 @@ def test_table_header_labels_the_estimate_and_shows_diem(monkeypatch, capsys, tm
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest tests/diem/test_cli_venice_usage.py -k "diem_and_have_no_delta or header_labels" -v`
+Run: `pytest tests/diem/test_cli.py -k "diem_and_have_no_delta or header_labels" -v`
 Expected: FAIL — `KeyError: 'est_usd'` / `assert "delta" not in row`.
 
 - [ ] **Step 3: Write the implementation**
@@ -350,7 +350,7 @@ Expected: all pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add diem/cli.py tests/diem/test_cli_venice_usage.py
+git add diem/cli.py tests/diem/test_cli.py
 git commit -m "fix(venice-usage): reconcile against DIEM; drop notional-vs-billed delta"
 ```
 
