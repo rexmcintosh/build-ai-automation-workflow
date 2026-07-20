@@ -26,6 +26,8 @@
 - **D-4 — The reporter's `delta$` column is removed, not fixed.** It subtracts Venice's *billed USD* from the ledger's *notional price-table estimate*. Under `usd: 0` caps the billed figure is always `0.0000` while the estimate is not, so the delta is guaranteed noise. Replaced with a `diem` column, which is what actually gets consumed.
 - **D-5 — The proposed `off_box` config is dropped (YAGNI).** It existed to stop off-box keys rendering as `uncovered`. All five off-box keys are being revoked, so after Task 6 every remaining key is on-box and the list would always be empty.
 - **D-6 — Sequencing is load-bearing:** code (with fallbacks) → deploy → Venice-side ops → paste keys → verify. Any other order either breaks callers or silently keeps billing to `DEFAULT`.
+- **D-7 — Cron does not see `~/.env`, so the drain must pass the keys through explicitly.** Debian cron runs the nightly `diem drain` under `/bin/sh`; `~/.zshenv` is zsh-only and never fires, so the drain process has **no** `VENICE_*` in its environment. `_drain_env` therefore reads `~/.env` itself and forwards every `VENICE_*` entry to the subprocesses it spawns. Without that, `loom backfill` — loom's *only* Venice path, and one that runs exclusively from this cron — falls back to the shared key and bills to `DEFAULT` forever, and Task 6 Step 8's acceptance check fails for loom. The same change stops the drain clobbering `VENICE_KEY`, which is romance's var under this map.
+- **D-8 — Blast radius, accepted knowingly.** After Step 6, `~/.env` exports **five** project Venice keys into every zsh process on the box, including every Claude Code session and the MCP servers it spawns. `council/venice.py::_scrub` redacts only the key that client is holding, so the other four are not covered by that defense-in-depth. This is inherent to D-1 (unique names in `~/.env`), not to any one change, and it is the largest-blast-radius decision in the plan.
 
 ## Key & Variable Map (target end state)
 
@@ -606,15 +608,50 @@ git commit -m "feat(venice-keys): swimtrack-website tools read VENICE_SWIMTRACK_
 
 - [ ] **Step 1: Merge and deploy all code changes**
 
+**Ordering is load-bearing.** `pipx reinstall council` installs from the shared checkout's
+**working tree**, not from a git ref (`pipx_metadata.json` records
+`package_or_url: /home/dev/projects/build-ai-automation-workflow` with `--force-reinstall`).
+Sessions routinely flip that tree between branches — the very reason `~/loom-runtime` exists —
+so the checkout must be sitting on merged `main` *before* the reinstall, or an unrelated
+branch gets baked into the global commands.
+
 ```bash
-# monorepo, then each external repo (merge --no-ff, push, delete the branch)
+# merge each repo first (merge --no-ff, push, delete the branch), then:
+git -C ~/projects/build-ai-automation-workflow checkout main
+git -C ~/projects/build-ai-automation-workflow pull          # tree now on merged main
 cd ~/projects/build-ai-automation-workflow
 pipx reinstall council          # refreshes council / diem / venice-usage on PATH
-bash loom/setup-runtime.sh      # refreshes ~/loom-runtime (the 02:00 cron's clone)
+bash loom/setup-runtime.sh      # refreshes ~/loom-runtime (the 02:00 absorb cron's clone)
 ```
 
 Verify both: `venice-usage report --group-by project` runs, and
 `cd / && PYTHONPATH=/home/dev/loom-runtime /home/dev/loom-runtime/.venv/bin/python -c "import loom.venice, inspect; print('venice_usage' in inspect.getsource(loom.venice))"` prints `True`.
+
+**Note which loom actually changed.** `loom` is not in the pipx venv (that ships `council`,
+`diem`, `venice_usage`). Loom reaches production two ways: `~/loom-runtime`, refreshed by
+`setup-runtime.sh` — but that path runs only `absorb`, which is Claude-backed and never
+touches the changed Venice code; and the shared repo's editable `.venv`, which is what the
+**drain** invokes (`diem/config.py` → `~/projects/build-ai-automation-workflow/.venv/bin/python -m loom.cli backfill`).
+That second path has no deploy command — it goes live the moment the shared tree sits on
+merged `main`, which the ordering above already guarantees.
+
+- [ ] **Step 1b: Audit the GitHub Actions secrets against the new key map**
+
+CI does not read `~/.env`, so nothing in Step 6 reaches it. `swimtrack`'s
+`.github/workflows/editorial-scan.yml` runs daily at 06:00 and is explicitly commented
+"recurring Venice spend", passing `VENICE_INFERENCE_KEY: ${{ secrets.VENICE_INFERENCE_KEY }}`.
+After this rollout CI has no `VENICE_SWIMTRACK_KEY`, so it falls through to that secret while
+local runs use the project key — splitting swimtrack's spend across two Venice keys unless the
+secret already holds the renamed `swimtrack` key's value. The Step 2 rename preserves key
+values, so this may already be correct; confirm rather than assume.
+
+```bash
+gh secret list -R rexmcintosh/swimtrack            # expect VENICE_INFERENCE_KEY
+gh secret list -R rexmcintosh/build-ai-automation-workflow   # VENICE_API_KEY (review CI)
+```
+
+Check the same for whichever repos back `venice-review.yml`. Re-paste any secret whose value
+no longer matches the key its project should now bill to.
 
 - [ ] **Step 2: Rename five keys on the Venice site** (user, https://venice.ai/settings/api)
 
