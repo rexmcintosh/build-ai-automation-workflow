@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 import pytest
@@ -7,6 +8,20 @@ from diem.balance import BalanceUnavailable
 from diem.config import DiemConfig
 from diem.queue import QueueDir
 from diem.runners import RunResult
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_venice_env(monkeypatch):
+    """~/.zshenv sources ~/.env into every zsh shell on this box, so os.environ
+    here may already carry real VENICE_API_KEY/VENICE_KEY/VENICE_* values. The
+    _drain_env tests below assert exact values for the generic names and must
+    never depend on -- or risk printing -- whatever real key happens to be
+    ambient on the host running the suite. Strip every VENICE_* var per test;
+    monkeypatch restores it automatically afterward (same guard as
+    tests/test_config.py's _clear_ambient_council_key, generalized to the
+    whole VENICE_ prefix and function-scoped instead of module-scoped)."""
+    for name in list(os.environ):
+        if name.startswith("VENICE_"):
+            monkeypatch.delenv(name, raising=False)
 
 def _cfg_file(tmp_path):
     p = tmp_path / "config.toml"
@@ -68,20 +83,57 @@ def test_drain_requires_checkpoint_flag(tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["drain", "--config", str(_cfg_file(tmp_path))])
 
-def test_drain_env_prepends_pipx_bin_dir_when_missing(monkeypatch):
+def test_drain_env_prepends_pipx_bin_dir_when_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    env = cli._drain_env("k")
+    # tmp_path has no .env -> generic names have nothing to fall back to but key.
+    # (Never point env_path at the real ~/.env in a test -- see
+    # test_drain_env_missing_env_file_still_sets_generic_names_from_key for why
+    # this can't just omit env_path and rely on the default.)
+    env = cli._drain_env("k", env_path=tmp_path / ".env")
     pipx_bin = str(Path.home() / ".local" / "bin")
     assert env["PATH"].startswith(pipx_bin)
     assert env["PATH"] == f"{pipx_bin}:/usr/bin:/bin"
     assert env["VENICE_API_KEY"] == "k" and env["VENICE_KEY"] == "k"
 
-def test_drain_env_does_not_double_prepend(monkeypatch):
+def test_drain_env_does_not_double_prepend(tmp_path, monkeypatch):
     pipx_bin = str(Path.home() / ".local" / "bin")
     monkeypatch.setenv("PATH", f"{pipx_bin}:/usr/bin:/bin")
-    env = cli._drain_env("k")
+    env = cli._drain_env("k", env_path=tmp_path / ".env")
     assert env["PATH"] == f"{pipx_bin}:/usr/bin:/bin"
     assert env["PATH"].split(":").count(pipx_bin) == 1
+
+def test_drain_env_passes_through_project_venice_vars(tmp_path):
+    # Cron runs `diem drain` under /bin/sh, so ~/.zshenv never sources ~/.env
+    # into os.environ -- _drain_env must read the project vars itself, or the
+    # queued council/loom subprocesses fall back to the shared key and bill
+    # to DEFAULT instead of their own project. This is the regression that
+    # would otherwise let loom's Venice usage show zero forever.
+    env_path = tmp_path / ".env"
+    env_path.write_text("VENICE_COUNCIL_KEY=council-secret\nVENICE_LOOM_KEY=loom-secret\n")
+    env = cli._drain_env("k", env_path=env_path)
+    assert env["VENICE_COUNCIL_KEY"] == "council-secret"
+    assert env["VENICE_LOOM_KEY"] == "loom-secret"
+
+def test_drain_env_venice_key_from_file_not_overwritten_by_key(tmp_path):
+    # VENICE_KEY is romance's var under the per-project map; the drain's own
+    # DEFAULT `key` must never clobber it even though it's also one of the
+    # two legacy generic names _drain_env used to force-set.
+    env_path = tmp_path / ".env"
+    env_path.write_text("VENICE_KEY=romance-secret\n")
+    env = cli._drain_env("k", env_path=env_path)
+    assert env["VENICE_KEY"] == "romance-secret"
+    assert env["VENICE_API_KEY"] == "k"  # absent from the file -> falls back to key
+
+def test_drain_env_missing_env_file_still_sets_generic_names_from_key(tmp_path):
+    env_path = tmp_path / "nope" / ".env"  # parent dir doesn't exist -> unreadable
+    env = cli._drain_env("k", env_path=env_path)
+    assert env["VENICE_API_KEY"] == "k" and env["VENICE_KEY"] == "k"
+
+def test_drain_env_does_not_leak_non_venice_entries(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("VENICE_COUNCIL_KEY=council-secret\nSOME_OTHER_SECRET=nope\n")
+    env = cli._drain_env("k", env_path=env_path)
+    assert "SOME_OTHER_SECRET" not in env
 
 def test_status_exits_zero_when_balance_unavailable(tmp_path, monkeypatch, capsys):
     cfgp = _cfg_file(tmp_path)
@@ -236,3 +288,47 @@ def test_venice_usage_degrades_when_admin_key_missing(tmp_path, monkeypatch, cap
     monkeypatch.setattr(cli, "load_venice_admin_key", boom)
     assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # must never hard-fail
     assert "unavailable" in capsys.readouterr().out.lower()
+
+
+def test_venice_usage_rows_report_diem_and_have_no_delta(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.25)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
+
+    monkeypatch.setattr(cli, "UsageClient", FakeClient)
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
+
+    cli._cmd_venice_usage(None, datetime(2026, 7, 20), as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    row = next(r for r in payload["rows"] if r["project"] == "council")
+
+    assert row["est_usd"] == 1.25
+    assert row["venice_usd"] == 0.0
+    assert row["venice_diem"] == 12.5
+    assert "delta" not in row
+
+
+def test_venice_usage_table_header_labels_the_estimate_and_shows_diem(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.25)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
+
+    monkeypatch.setattr(cli, "UsageClient", FakeClient)
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
+
+    cli._cmd_venice_usage(None, datetime(2026, 7, 20))
+    out = capsys.readouterr().out
+    assert "est$" in out and "diem" in out
+    assert "delta" not in out
+    # The estimate must be labelled as notional so it is never read as billed spend.
+    assert "estimate" in out.lower()

@@ -12,7 +12,7 @@ from pathlib import Path
 import venice_usage
 
 from .balance import BalanceClient, BalanceUnavailable
-from .config import DiemConfig, load_venice_key, load_venice_admin_key
+from .config import DiemConfig, load_venice_key, load_venice_admin_key, _read_env
 from .drain import _last_fired, floor_for, next_deadline, next_reset, run_checkpoint
 from .queue import QueueDir, new_item
 from .report import evening_ping, send_telegram, write_morning_report
@@ -39,12 +39,25 @@ def _diem_day(cfg, now: datetime) -> str:
     return (next_reset(cfg, now) - timedelta(days=1)).date().isoformat()
 
 
-def _drain_env(key: str) -> dict:
-    """Env for shelled-out subprocesses (council/loom/cmd). Cron's PATH is
-    just /usr/bin:/bin, so a bare `council` argv is unresolvable unless
-    pipx's bin dir is on it — prepend it, without duplicating an entry
-    that's already there."""
-    env = {**os.environ, "VENICE_API_KEY": key, "VENICE_KEY": key}
+def _drain_env(key: str, env_path: Path = Path.home() / ".env") -> dict:
+    """Env for shelled-out subprocesses (council/loom/cmd). Cron runs this
+    under /bin/sh, so ~/.zshenv never fires and ~/.env is never sourced —
+    os.environ has no VENICE_* at all. Read them directly and pass the
+    per-project keys through, or every queued subprocess falls back to the
+    shared key and bills to DEFAULT instead of its own project.
+
+    Cron's PATH is also just /usr/bin:/bin, so a bare `council` argv is
+    unresolvable unless pipx's bin dir is on it — prepend it, without
+    duplicating an entry that's already there."""
+    env = {**os.environ}
+    for name, value in _read_env(env_path).items():
+        if name.startswith("VENICE_"):
+            env[name] = value
+    # Generic names are the fallback tier, not an override: VENICE_KEY is
+    # romance's var under the per-project map and must not be clobbered when
+    # ~/.env defines it.
+    env.setdefault("VENICE_API_KEY", key)
+    env.setdefault("VENICE_KEY", key)
     pipx_bin = str(Path.home() / ".local" / "bin")
     path = env.get("PATH", "/usr/bin:/bin")
     if pipx_bin not in path.split(":"):
@@ -115,24 +128,27 @@ def _cmd_venice_usage(cfg, now, *, days=7, as_json=False) -> int:
     since = (now - timedelta(days=days)).isoformat(timespec="seconds")
     ledger = {r["project"]: r["usd"]
               for r in venice_usage.query_rollup(since=since, group_by=("project",))}
-    venice = {}
+    venice_usd: dict[str, float] = {}
+    venice_diem: dict[str, float] = {}
     warn = None
     try:
         for k in UsageClient(load_venice_admin_key()).per_key_usage():
             name = k["key_name"]
             proj = name[len("proj-"):] if name.startswith("proj-") else name
-            venice[proj] = venice.get(proj, 0.0) + k["usd"]
+            venice_usd[proj] = venice_usd.get(proj, 0.0) + k["usd"]
+            venice_diem[proj] = venice_diem.get(proj, 0.0) + k["diem"]
     except (UsageUnavailable, SystemExit) as e:
         warn = str(e) or "venice usage unavailable"
-    projects = sorted(set(ledger) | set(venice))
+    projects = sorted(set(ledger) | set(venice_usd))
     rows = []
     for p in projects:
-        lu, vu = ledger.get(p), venice.get(p)
+        lu, vu, vd = ledger.get(p), venice_usd.get(p), venice_diem.get(p)
         note = "" if (lu is not None and vu is not None) else \
                ("uncovered" if lu is None else "no key")
-        rows.append({"project": p, "ledger_usd": round(lu or 0.0, 4),
+        rows.append({"project": p,
+                     "est_usd": round(lu or 0.0, 4),
                      "venice_usd": None if vu is None else round(vu, 4),
-                     "delta": None if (lu is None or vu is None) else round((vu - lu), 4),
+                     "venice_diem": None if vd is None else round(vd, 4),
                      "note": note})
     if as_json:
         print(json.dumps({"days": days, "warning": warn, "rows": rows}, indent=1))
@@ -140,11 +156,15 @@ def _cmd_venice_usage(cfg, now, *, days=7, as_json=False) -> int:
     if warn:
         print(f"warning: Venice usage unavailable ({warn}) — showing ledger only")
     print(f"venice-usage reconcile (last {days}d)")
-    print(f"{'project':16} {'ledger$':>9} {'venice$':>9} {'delta$':>9}  note")
+    # est$ is the ledger's price-table estimate, NOT billed spend. Inference keys are
+    # capped usd:0 and run on the DIEM allowance, so venice$ is normally 0.0000 and
+    # `diem` is the figure that reflects real consumption.
+    print("est$ = ledger estimate (notional); venice$ = billed USD; diem = allowance used")
+    print(f"{'project':16} {'est$':>9} {'venice$':>9} {'diem':>9}  note")
     for r in rows:
         vu = "-" if r["venice_usd"] is None else f"{r['venice_usd']:.4f}"
-        dl = "-" if r["delta"] is None else f"{r['delta']:+.4f}"
-        print(f"{r['project']:16} {r['ledger_usd']:9.4f} {vu:>9} {dl:>9}  {r['note']}")
+        vd = "-" if r["venice_diem"] is None else f"{r['venice_diem']:.4f}"
+        print(f"{r['project']:16} {r['est_usd']:9.4f} {vu:>9} {vd:>9}  {r['note']}")
     return 0
 
 

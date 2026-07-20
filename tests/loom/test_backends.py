@@ -36,3 +36,27 @@ def test_venice_backend_maps_roles(monkeypatch):
 def test_unknown_backend_raises():
     with pytest.raises(ValueError):
         backends.get_backend("bogus")
+
+
+def test_venice_backend_prefers_the_loom_key(monkeypatch):
+    monkeypatch.setenv("VENICE_LOOM_KEY", "loom-key")
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert backends.get_backend("venice")._client.api_key == "loom-key"
+
+
+def test_venice_backend_falls_back_to_the_shared_key(monkeypatch):
+    monkeypatch.delenv("VENICE_LOOM_KEY", raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert backends.get_backend("venice")._client.api_key == "default-key"
+
+
+def test_explicit_api_key_wins_over_both(monkeypatch):
+    monkeypatch.setenv("VENICE_LOOM_KEY", "loom-key")
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert backends.get_backend("venice", api_key="explicit")._client.api_key == "explicit"
+
+
+def test_blank_loom_key_falls_through(monkeypatch):
+    monkeypatch.setenv("VENICE_LOOM_KEY", "")
+    monkeypatch.setenv("VENICE_API_KEY", "default-key")
+    assert backends.get_backend("venice")._client.api_key == "default-key"

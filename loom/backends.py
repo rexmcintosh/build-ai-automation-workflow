@@ -40,5 +40,10 @@ def get_backend(name: str, api_key: Optional[str] = None) -> Backend:
         return ClaudeBackend()
     if name == "venice":
         import os
-        return VeniceBackend(api_key or os.environ.get("VENICE_API_KEY", ""))
+        # One Venice key per project; VENICE_API_KEY remains the fallback so
+        # this is safe to deploy before the loom key is minted.
+        key = (api_key
+               or os.environ.get("VENICE_LOOM_KEY")
+               or os.environ.get("VENICE_API_KEY", ""))
+        return VeniceBackend(key)
     raise ValueError(f"unknown backend: {name}")
