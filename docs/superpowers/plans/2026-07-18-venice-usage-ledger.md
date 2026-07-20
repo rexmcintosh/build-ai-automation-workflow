@@ -32,6 +32,7 @@
 - **D5 — Key→project mapping by naming convention.** Reconcile maps a Venice key to a project by its `description`: a `proj-<project>` prefix is stripped, otherwise the name is used as-is. No extra config file.
   **Live reality (observed 2026-07-19, 13 keys on the account):** existing keys are named `ADMIN`, `CI`, `DEFAULT`, `romance-empire`, `Swimtrack`, `swimtrack_coach`, `SwimTrack-Images`, `AI-Council`, `Claude Code`, `GameBuilding`, `MacWhisper`, `OpenClaw`, `n8n` — none use a `proj-` prefix, and several belong to **off-box** consumers (MacWhisper/OpenClaw/n8n/Claude Code) not documented in the secrets map.
   ⚠️ **Harmonization is required for reconcile to align:** the key `description` must equal the `project` tag the ledger writes. Planned ledger tags (`romance`, `swimtrack`, `swimtrack-coach`, `swimtrack-website`, …) do **not** match today's key names (`romance-empire`, `Swimtrack`, `swimtrack_coach`). Phase D must pick one and apply it consistently — either rename the Venice keys to the ledger tags (or `proj-<tag>`), or choose ledger tags that match the key names. Off-box and non-project keys (ADMIN/CI/DEFAULT/MacWhisper/…) simply show up unmatched, which is correct and harmless.
+  ✅ **DECIDED 2026-07-19 — clean tags, keys renamed to match exactly (no `proj-` prefix).** The canonical tags are the `project` column of the Phase C site table: **`romance`, `swimtrack`, `swimtrack-coach`, `swimtrack-website`, `council`, `loom`, `venice-ai-skill`**. Phase C hardcodes exactly these at the call-sites; Phase D renames/mints the Venice keys to those exact strings so `description == project` and the reconcile table lines up with no indirection.
 - **D6 — diem gains `VENICE_ADMIN_KEY`.** diem does not read it today (grep-confirmed); Task B1 wires it (`load_venice_admin_key()` reading `~/.env`). The balance probe keeps using the inference key.
 
 **Known deltas from the brief (reality wins):**
@@ -1040,7 +1041,14 @@ For paths that are expensive/awkward to run live, assert via the project's own t
 | 17 | `swimtrack-coach/lib/parser/venice.ts` `parseWorkout()` | node | `swimtrack-coach` | `parse` | `parser/venice` | openai SDK resp `.usage` |
 | 18 | `swimtrack-website/tools/i18n/venice.mjs` `completeJSON()` | node | `swimtrack-website` | `translate` | `i18n/venice` | fetch resp `usage` |
 | 19 | `swimtrack-website/tools/image-engine/engine/venice.py` `generate()` | py (shim) | `swimtrack-website` | `image` (or `asset_type`) | `image-engine` | image; `--usd` from its pricing |
-| 20 | `.claude/skills/venice-ai/scripts/generate.py` | py (shim) | `venice-ai-skill` | `image`/`video` | `venice-ai-skill` | only **video** path; image + video subcommands |
+| 20 | `.claude/skills/venice-ai/scripts/generate.py` | py (shim) | `venice-ai-skill` | `image`/`video` | `venice-ai-skill` | image + video subcommands |
+| 21 | `romance-empire/src/social/reels.py` | py (shim) | `romance` | `video` | `reels` | ⚠️ **found during execution — missing from the original inventory.** Async video (`/video/queue` + poll loop) |
+
+> **Async video rule (sites 20 & 21):** log exactly **one row per generation, at submit** — never inside the poll loop, and not on retrieval. Submit fires once regardless of poll count and still counts jobs Venice bills but the client never successfully retrieves (timeout/crash/network drop); retrieval-based logging silently undercounts those.
+
+> **`venice-edit.sh` / `venice-qc.sh` nuance:** these `exec` into `edit_pipeline.py` by default and only use curl under `VENICE_EDIT_LEGACY=1` / `VENICE_QC_LEGACY=1`. Production edit/qc traffic therefore flows through the centrally-instrumented `venice_runtime.VeniceClient.complete()`. The paths are mutually exclusive, so instrumenting both cannot double-count.
+
+> 🔒 **Standing rule — test isolation (learned the hard way).** An instrumented client calls `append(db_path=None)`, which resolves `$VENICE_USAGE_DB` at call time and **falls back to the REAL ledger when unset**. Any test that drives an instrumented function without setting it writes junk into production billing data — this actually happened in 4 of 5 repos (53 junk rows, surgically removed). **Every instrumented repo must have a suite-wide guard**, not per-test discipline: pytest → an autouse `conftest.py` fixture setting `VENICE_USAGE_DB` to a tmp path; vitest → a `setupFiles` entry doing `process.env.VENICE_USAGE_DB ||= <tmp>`; stdlib unittest → `os.environ.setdefault(...)` in the tests package `__init__.py`. Verify by measuring the real ledger's row count before and after a full suite run — it must be unchanged.
 
 > The live deployed copies under `/home/dev/loom-runtime/` (council/loom/diem) are refreshed from source on the normal deploy path — instrument source, then redeploy/reinstall, don't hand-edit the runtime tree. Do **not** edit `build/lib/**`, `.next/**`, `**/.claude/worktrees/**`, or `dump/**` copies.
 
@@ -1049,6 +1057,12 @@ For paths that are expensive/awkward to run live, assert via the project's own t
 ## Phase D — Ops (keys, old-key retirement, Telegram) — no TDD gate
 
 Sequenced after the ledger exists so wiring + reconcile can be validated end-to-end. **The user mints + caps keys on the Venice site and pastes values via a hidden prompt — never print a value, never put one on a command line or in shell history.**
+
+> **Live evidence gathered 2026-07-19/20 that shapes Phase D:**
+> 1. **romance-empire currently spends on the `DEFAULT` key, not its own.** A real production run (20 videos + 24 images, **$27.45**) logged to the ledger while Phase C was landing; Venice shows `DEFAULT` last-used at that moment, while the key actually *named* `romance-empire` hadn't been touched for two days. This is exactly the mis-attribution per-project keys exist to fix — D1 is not cosmetic.
+> 2. **Venice usage figures lag.** `DEFAULT` reported `trailingSevenDays.usd = 0.0000` *and* `currentPeriodUsage.usd = 0.0000` minutes after real spend on it. So `diem venice-usage` is a **drift detector over days, not a real-time cross-check** — a fresh same-day delta is expected and is not a bug. Don't chase it; compare over a multi-day window.
+> 3. **The reconcile splits a project in two until names are harmonized** — the live table showed `romance` (ledger $27.45, note `no key`) and `romance-empire` (Venice $7.55, note `uncovered`) as separate rows. Renaming the key to the canonical tag (D5) collapses them into one reconciled line.
+> 4. **Consider an `off_box` list in diem's config** so keys for other machines (`MacWhisper`, `OpenClaw`, `Claude Code`, `n8n`, `GameBuilding`) render as `off-box` rather than `uncovered`. Today the `uncovered` column conflates "instrumentation is broken" (actionable) with "runs on another machine" (expected forever), which blunts the signal.
 
 ### D1: Mint + wire per-project keys (each independently)
 

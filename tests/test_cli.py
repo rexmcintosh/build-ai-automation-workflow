@@ -23,6 +23,27 @@ def test_ask_runs_and_prints_recommendation(capsys, member_json):
     assert "do X" in capsys.readouterr().out
 
 
+def test_ask_forwards_task_type_ask_for_usage_logging(capsys, member_json):
+    # council/cli.py's ask path must thread task_type="ask" all the way down to
+    # every complete() call (router + panel + chair) for accurate usage attribution.
+    settings, panels, client = _env(member_json)
+    cli.main(["ask", "ship X?"], _settings=settings, _panels=panels, _client=client)
+    assert client.calls  # sanity: calls actually happened
+    assert all(c["task_type"] == "ask" for c in client.calls)
+
+
+def test_review_cmd_leaves_task_type_at_default(capsys, member_json, tmp_path):
+    # council/cli.py's single-file/dir/diff `review` subcommand is distinct from
+    # council/review.py's PR-review path — only the latter was asked to log "review".
+    settings, panels, client = _env(member_json)
+    f = tmp_path / "app.py"
+    f.write_text("print('hi')\n")
+    cli.main(["review", str(f), "--panel", "code-review"],
+             _settings=settings, _panels=panels, _client=client)
+    assert client.calls
+    assert all(c["task_type"] == "chat" for c in client.calls)
+
+
 def test_panels_lists_names(capsys, member_json):
     settings, panels, client = _env(member_json)
     rc = cli.main(["panels"], _settings=settings, _panels=panels, _client=client)
