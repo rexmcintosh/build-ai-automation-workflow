@@ -1,6 +1,23 @@
+import os
 import textwrap
 import pytest
 from council.config import load_panels, get_api_key, Settings, truncate
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _clear_ambient_council_key():
+    """VENICE_COUNCIL_KEY is a project-specific key that ~/.env now (or soon
+    will) export into every shell on this machine. The older tests below
+    predate that var and only set/clear VENICE_API_KEY, so they assume no
+    other key var is present. Strip any ambient VENICE_COUNCIL_KEY for the
+    duration of this module so that assumption holds regardless of the host
+    environment; tests further down that exercise VENICE_COUNCIL_KEY set it
+    themselves via monkeypatch, which restores per-test as usual."""
+    old_value = os.environ.pop("VENICE_COUNCIL_KEY", None)
+    yield
+    if old_value is not None:
+        os.environ["VENICE_COUNCIL_KEY"] = old_value
+
 
 TOML = textwrap.dedent("""
 [settings]
