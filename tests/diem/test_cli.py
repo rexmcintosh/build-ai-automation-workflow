@@ -236,3 +236,47 @@ def test_venice_usage_degrades_when_admin_key_missing(tmp_path, monkeypatch, cap
     monkeypatch.setattr(cli, "load_venice_admin_key", boom)
     assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # must never hard-fail
     assert "unavailable" in capsys.readouterr().out.lower()
+
+
+def test_venice_usage_rows_report_diem_and_have_no_delta(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.25)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
+
+    monkeypatch.setattr(cli, "UsageClient", FakeClient)
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
+
+    cli._cmd_venice_usage(None, datetime(2026, 7, 20), as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    row = next(r for r in payload["rows"] if r["project"] == "council")
+
+    assert row["est_usd"] == 1.25
+    assert row["venice_usd"] == 0.0
+    assert row["venice_diem"] == 12.5
+    assert "delta" not in row
+
+
+def test_venice_usage_table_header_labels_the_estimate_and_shows_diem(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.25)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def per_key_usage(self):
+            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
+
+    monkeypatch.setattr(cli, "UsageClient", FakeClient)
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
+
+    cli._cmd_venice_usage(None, datetime(2026, 7, 20))
+    out = capsys.readouterr().out
+    assert "est$" in out and "diem" in out
+    assert "delta" not in out
+    # The estimate must be labelled as notional so it is never read as billed spend.
+    assert "estimate" in out.lower()
