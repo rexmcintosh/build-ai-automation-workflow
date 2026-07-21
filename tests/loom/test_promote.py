@@ -208,3 +208,88 @@ def test_promote_refuses_out_of_band_edit(env):
     with pytest.raises(PromoteError):
         promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"], expect_unmodified=True)
     assert tgt.read_text() == "USER EDITED THIS\n"        # untouched
+
+
+# --- mirroring to the remote -------------------------------------------------
+# Loom is useless as a knowledge base if Rex cannot read it. He reads it in Obsidian,
+# which clones the GitHub remote — so a promote that never leaves the VPS is invisible.
+
+@pytest.fixture
+def env_remote(env, tmp_path):
+    """`env` plus a bare origin holding master — the GitHub mirror Obsidian clones."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    _git(env["wiki"], "remote", "add", "origin", str(origin))
+    _git(env["wiki"], "push", "-q", "-u", "origin", "master")
+    return {**env, "origin": origin}
+
+
+def _remote_sha(origin, ref="master"):
+    return subprocess.run(["git", "-C", str(origin), "rev-parse", ref],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_promote_pushes_master_to_origin(env_remote):
+    """The whole point: what promote lands must reach the remote, or Obsidian never sees it."""
+    res = promote(wiki_root=env_remote["wiki"], claude_root=env_remote["claude"],
+                  backups_dir=env_remote["backups"])
+    assert res["pushed"] is True
+    assert _remote_sha(env_remote["origin"]) == _rev(env_remote["wiki"], "master")
+
+
+def test_promote_takes_remote_edits_before_merging(env_remote):
+    """Rex fixes an article in Obsidian and pushes. Promote must absorb that first,
+    or its own push is rejected non-fast-forward and mirroring silently dies."""
+    clone = env_remote["origin"].parent / "clone"
+    subprocess.run(["git", "clone", "-q", str(env_remote["origin"]), str(clone)], check=True)
+    _git(clone, "config", "user.email", "t@t"); _git(clone, "config", "user.name", "t")
+    (clone / "people" / "rex.md").write_text("# Rex\nhand-written in Obsidian\n")
+    _git(clone, "add", "-A"); _git(clone, "commit", "-qm", "obsidian edit")
+    _git(clone, "push", "-q", "origin", "master")
+
+    res = promote(wiki_root=env_remote["wiki"], claude_root=env_remote["claude"],
+                  backups_dir=env_remote["backups"])
+
+    assert res["pushed"] is True
+    # Rex's edit survived AND the weave landed
+    assert (env_remote["wiki"] / "people" / "rex.md").read_text() == "# Rex\nhand-written in Obsidian\n"
+    assert (env_remote["wiki"] / "people" / "liam.md").read_text() == "# Liam\nv1 woven\n"
+    assert _remote_sha(env_remote["origin"]) == _rev(env_remote["wiki"], "master")
+
+
+def test_unreachable_remote_aborts_before_mutating(env_remote):
+    """If we cannot even read the remote we cannot know we are up to date, so stop
+    while nothing has changed rather than promote onto a possibly stale master."""
+    gone = env_remote["origin"].parent / "vanished.git"
+    _git(env_remote["wiki"], "remote", "set-url", "origin", str(gone))
+    with pytest.raises(PromoteError):
+        promote(wiki_root=env_remote["wiki"], claude_root=env_remote["claude"],
+                backups_dir=env_remote["backups"])
+    assert not (env_remote["claude"] / "memory" / "feedback-x.md").exists()
+    assert _rev(env_remote["wiki"], "master") == _rev(env_remote["wiki"], "origin/master")
+
+
+def test_push_failure_keeps_the_promote_and_reports_it(env_remote):
+    """Fetch worked, so the promote is sound and committed; only the mirror leg failed.
+    Undoing good content over a network blip would be the worse outcome — report instead."""
+    hook = env_remote["origin"] / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    res = promote(wiki_root=env_remote["wiki"], claude_root=env_remote["claude"],
+                  backups_dir=env_remote["backups"])
+
+    assert res["pushed"] is False and res["push_error"]
+    # the promote itself stands: .claude applied, weave on master, tree clean
+    assert (env_remote["claude"] / "memory" / "feedback-x.md").read_text() == "a new preference\n"
+    assert (env_remote["wiki"] / "people" / "liam.md").read_text() == "# Liam\nv1 woven\n"
+    porcelain = subprocess.run(["git", "-C", str(env_remote["wiki"]), "status", "--porcelain"],
+                               capture_output=True, text=True).stdout.strip()
+    assert porcelain == ""
+
+
+def test_local_only_wiki_still_promotes(env):
+    """No remote configured (fresh install, tests) — promote must not require one."""
+    res = promote(wiki_root=env["wiki"], claude_root=env["claude"], backups_dir=env["backups"])
+    assert res["pushed"] is None          # not applicable, not a failure
+    assert (env["wiki"] / "people" / "liam.md").read_text() == "# Liam\nv1 woven\n"
