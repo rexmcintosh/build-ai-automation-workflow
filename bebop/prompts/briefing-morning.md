@@ -19,6 +19,13 @@ DO THIS, IN ORDER:
    📧 <each important email as ONE line: sender — gist (what's needed)>, or "nothing needs you"
    No links unless essential. If a section is empty, say so in 2–3 words. Do not pad.
 
+   Then, LAST, append the block below EXACTLY as given, character for character. Do
+   not reword, renumber, summarise, or "improve" it — it is pre-composed and its
+   counts are computed, not estimated, so a paraphrase would misreport what Rex is
+   being asked to decide. If the block is blank, append nothing at all and do not
+   mention loom, the wiki, or articles anywhere in the briefing.
+{{LOOM}}
+
 4. SEND — Call the Telegram reply tool to send the composed briefing to chat_id {{CHAT_ID}}.
 
 5. OUTPUT — After the message is sent, output exactly: SENT

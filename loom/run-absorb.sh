@@ -41,22 +41,55 @@ TS="$(date -Iseconds)"
 OUT="$("$PY" -m loom.cli absorb --live 2>>"$LOG.err")"; RC=$?
 echo "[$TS] rc=$RC $OUT" >>"$LOG"
 
-# Build the Telegram message (scrubbed) from the JSON summary; fall back on failure text.
-MSG="$("$PY" - "$RC" "$OUT" <<'PY' 2>/dev/null
-import sys, json
-from loom.summary import format_run_summary, scrub
-rc, out = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else ""
+# --- AUTO-PROMOTE -------------------------------------------------------------
+# Promote runs HERE, inside the absorb flock, rather than near the 23:50 diem
+# deadline. A drain job hard-killed at that deadline dies mid-weave and leaves the
+# loom-shadow worktree dirty, and promote's preflight (rightly) aborts on a dirty
+# shadow — that happened on 2026-07-19. Under this flock no other loom process is
+# running, so the shadow has settled. `--auto` consults the gate: it stands down on
+# a hold, and refuses outright if a _staged/.claude swap is waiting (those rewrite
+# live memories/skills and stay hand-gated). A refusal is a normal outcome.
+PROMO="$("$PY" -m loom.cli promote --auto 2>>"$LOG.err")"; PRC=$?
+echo "[$TS] promote rc=$PRC $PROMO" >>"$LOG"
+
+# --- SNAPSHOT FOR THE MORNING BRIEFING -----------------------------------------
+# One payload, read by the 07:00 briefing to emit (or omit) its single loom line.
+# Written atomically (tmp + mv): the briefing may read this at any moment, and a
+# half-written file would silently cost Rex the line. `promoted` carries what just
+# landed — the post-promote `pending` state no longer knows, since it merged.
+"$PY" - "$PROMO" <<'PY' > "$DATA_REPO/loom/pending.json.tmp" 2>>"$LOG.err" && \
+  mv -f "$DATA_REPO/loom/pending.json.tmp" "$DATA_REPO/loom/pending.json" || \
+  rm -f "$DATA_REPO/loom/pending.json.tmp"
+import json, sys, time
+from loom.cli import default_config, pending_payload
+payload = pending_payload(default_config(), time.strftime("%Y-%m-%d"))
 try:
-    print(format_run_summary(json.loads(out)))
-except Exception:
-    print(scrub(f"⚠️ Loom absorb failed (rc={rc}). Check loom/logs/."))
+    payload["promoted"] = json.loads(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else {}
+except json.JSONDecodeError:
+    payload["promoted"] = {}
+json.dump(payload, sys.stdout)
+PY
+
+# --- TELEGRAM: FAILURES ONLY ---------------------------------------------------
+# Success used to ping here every night, and that is exactly what turned this
+# channel into wallpaper: the summary read "loom-shadow: 90 commits to review
+# ⚠️ STALE" nightly for 8 days and was never acted on. The daily report now rides
+# in the 07:00 Bebop briefing — the one stream Rex actually reads. Failures still
+# ping, so silence never hides a break.
+if [ "$RC" -ne 0 ] || [ "$PRC" -ne 0 ]; then
+  MSG="$("$PY" - "$RC" "$PRC" <<'PY' 2>/dev/null
+import sys
+from loom.summary import scrub
+rc, prc = sys.argv[1], sys.argv[2]
+what = "absorb" if rc != "0" else "promote"
+print(scrub(f"⚠️ Loom {what} failed (absorb rc={rc}, promote rc={prc}). Check loom/logs/."))
 PY
 )"
-[ -z "$MSG" ] && MSG="⚠️ Loom absorb (rc=$RC). Check loom/logs/."
-
-PROMPT="Send a Telegram message to chat_id ${CHAT_ID} with text: ${MSG} Output only SENT or FAILED."
-claude -p "$PROMPT" \
-  --model haiku --allowedTools mcp__plugin_telegram_telegram__reply \
-  --dangerously-skip-permissions --output-format text >/dev/null 2>&1 || true
+  [ -z "$MSG" ] && MSG="⚠️ Loom failed (absorb rc=$RC, promote rc=$PRC). Check loom/logs/."
+  PROMPT="Send a Telegram message to chat_id ${CHAT_ID} with text: ${MSG} Output only SENT or FAILED."
+  claude -p "$PROMPT" \
+    --model haiku --allowedTools mcp__plugin_telegram_telegram__reply \
+    --dangerously-skip-permissions --output-format text >/dev/null 2>&1 || true
+fi
 
 exit $RC
