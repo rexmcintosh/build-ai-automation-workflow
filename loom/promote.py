@@ -61,6 +61,28 @@ def _shadow_has_stage(wiki_root: Path) -> List[str]:
     return [ln for ln in out if ln.startswith(_STAGE + "/")]
 
 
+def _remote_name(root: Path) -> Optional[str]:
+    """The remote master is mirrored to, or None for a local-only wiki (tests, fresh
+    installs). Having no remote is a valid configuration, not an error."""
+    return "origin" if "origin" in _git(root, "remote", check=False).stdout.split() else None
+
+
+def _sync_from_remote(root: Path, remote: str) -> None:
+    """Absorb commits made off the VPS (Rex correcting an article in Obsidian) BEFORE
+    merging loom-shadow. Skipping this makes the post-promote push non-fast-forward, so
+    mirroring dies silently and the wiki looks frozen from every other device. Called in
+    PREFLIGHT, so anything wrong here aborts while nothing has been mutated yet."""
+    fetched = _git(root, "fetch", "-q", remote, check=False)
+    if fetched.returncode != 0:
+        raise PromoteError(f"cannot reach {remote}: {fetched.stderr.strip()}")
+    if _git(root, "rev-parse", "--verify", "-q", f"{remote}/master", check=False).returncode != 0:
+        return                                    # remote has no master yet — nothing to take
+    merged = _git(root, "merge", "--no-edit", "-q", f"{remote}/master", check=False)
+    if merged.returncode != 0:
+        _git(root, "merge", "--abort", check=False)
+        raise PromoteError(f"master conflicts with {remote}/master; resolve by hand")
+
+
 def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
             *, shadow_root: Optional[Path] = None, ts: Optional[str] = None,
             expect_unmodified: bool = False) -> dict:
@@ -89,6 +111,11 @@ def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
         if _git(shadow_root, "status", "--porcelain").stdout.strip():
             raise PromoteError("shadow worktree is dirty; aborting")
     _git(wiki_root, "checkout", "-q", "master")
+    remote = _remote_name(wiki_root)
+    if remote:
+        _sync_from_remote(wiki_root, remote)
+    # Captured AFTER the remote sync so a rollback returns to "in step with the remote",
+    # never to a state that would drop commits Rex made elsewhere.
     orig_master = _git(wiki_root, "rev-parse", "HEAD").stdout.strip()
     dry = _git(wiki_root, "merge", "--no-commit", "--no-ff", "loom-shadow", check=False)
     _git(wiki_root, "merge", "--abort", check=False)
@@ -149,7 +176,18 @@ def promote(wiki_root: Path, claude_root: Path, backups_dir: Path,
         _git(wiki_root, "merge", "--abort", check=False)
         _git(wiki_root, "reset", "-q", "--hard", orig_master, check=False)
         raise PromoteError(f"promote failed, rolled back: {e}") from e
-    return {"applied": len(applied), "ts": ts}
+
+    # 7. MIRROR to the remote. Deliberately OUTSIDE the rollback boundary: the content is
+    # committed and good, so a push that fails is a mirroring problem to report — never a
+    # reason to undo a sound promote. `pushed` is None when the wiki has no remote at all.
+    pushed: Optional[bool] = None
+    push_error = None
+    if remote:
+        p = _git(wiki_root, "push", "-q", remote, "master", check=False)
+        pushed = p.returncode == 0
+        if not pushed:
+            push_error = p.stderr.strip() or "push failed"
+    return {"applied": len(applied), "ts": ts, "pushed": pushed, "push_error": push_error}
 
 
 def _rollback_manifest(manifest: List[dict]) -> None:
