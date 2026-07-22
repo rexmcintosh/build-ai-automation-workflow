@@ -2,7 +2,10 @@
 """`python -m loom.cli <cmd>`:
   absorb [--live] [--max-targets N] [--deadline-seconds S]   nightly distill (+weave if --live), backend=claude
   backfill [--max-targets N] [--all]     backlog weave, backend=venice (DIEM)
-  promote                                apply staged .claude + merge loom-shadow -> master
+  promote [--auto]                       apply staged .claude + merge loom-shadow -> master
+                                         (--auto: only if the unattended gate allows)
+  hold [--clear]                         veto tonight's auto-promote (self-expires next day)
+  pending                                JSON: what's landing + what needs a decision
   requeue <session_id>                   return a quarantined/stuck session to pending
   rollback --ts <stamp>                  restore ~/.claude from a promote backup
 """
@@ -20,6 +23,9 @@ class _PathEncoder(json.JSONEncoder):
             return str(o)
         return super().default(o)
 
+from .autopromote import auto_promote_check, clear_hold, set_hold
+from .ledger import WeaveLedger
+from .pending import cluster_blocked, pending_summary
 from .promote import promote, rollback
 from .run import Config, absorb
 from .state import LoomState
@@ -27,6 +33,12 @@ from .state import LoomState
 _HOME = Path.home()
 _REPO = _HOME / "projects" / "build-ai-automation-workflow"
 _LOOM = _REPO / "loom"
+
+
+def pending_payload(cfg: Config, today: str) -> dict:
+    return pending_summary(wiki_root=cfg.wiki_master, ledger_path=cfg.ledger_path,
+                           learnings_dir=cfg.loom_dir / "learnings",
+                           loom_dir=cfg.loom_dir, today=today)
 
 
 def default_config() -> Config:
@@ -56,7 +68,10 @@ def main(argv=None) -> int:
     b.add_argument("--max-per-target", type=int, default=4)
     b.add_argument("--all", action="store_true")
 
-    sub.add_parser("promote")
+    pr = sub.add_parser("promote")
+    pr.add_argument("--auto", action="store_true")
+    hd = sub.add_parser("hold"); hd.add_argument("--clear", action="store_true")
+    sub.add_parser("pending")
     rq = sub.add_parser("requeue"); rq.add_argument("session_id")
     rb = sub.add_parser("rollback"); rb.add_argument("--ts", required=True)
 
@@ -77,10 +92,27 @@ def main(argv=None) -> int:
                          max_per_target=args.max_per_target, today=today, distill=False)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "promote":
+        landed = {}
+        if getattr(args, "auto", False):
+            # Unattended: the gate decides. A refusal is a normal outcome, not an
+            # error — the nightly run must not fail just because it stood down.
+            check = auto_promote_check(wiki_root=cfg.wiki_master,
+                                       loom_dir=cfg.loom_dir, today=today)
+            if not check["go"]:
+                print(json.dumps({"promoted": False, **check}, cls=_PathEncoder)); return 0
+            # Carry what's about to land: once promote() merges, the pending list is
+            # gone, and the morning briefing line is built from this JSON.
+            landed = {"articles": check["articles"], "commits": check["commits"]}
         res = promote(wiki_root=cfg.wiki_master, shadow_root=cfg.wiki_worktree,
                       claude_root=cfg.claude_dir,
                       backups_dir=cfg.loom_dir / "promote-backups", expect_unmodified=True)
-        print(json.dumps(res, cls=_PathEncoder)); return 0
+        print(json.dumps({"promoted": True, **landed, **res}, cls=_PathEncoder)); return 0
+    if args.cmd == "hold":
+        if args.clear:
+            clear_hold(cfg.loom_dir); print(json.dumps({"hold": None})); return 0
+        set_hold(cfg.loom_dir, today); print(json.dumps({"hold": today})); return 0
+    if args.cmd == "pending":
+        print(json.dumps(pending_payload(cfg, today), cls=_PathEncoder)); return 0
     if args.cmd == "requeue":
         # Re-queue a quarantined/stuck session -> next `absorb` re-runs Stage-0 from scratch.
         # (A committed session won't re-weave: git trailers reconcile it back to committed.)
