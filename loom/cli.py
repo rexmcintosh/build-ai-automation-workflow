@@ -1,6 +1,7 @@
 # loom/cli.py
 """`python -m loom.cli <cmd>`:
-  absorb [--live] [--max-targets N] [--deadline-seconds S]   nightly distill (+weave if --live), backend=claude
+  absorb [--live] [--max-targets N] [--deadline-seconds S] [--weave-reserve F]
+                                         nightly distill (+weave if --live), backend=claude
   backfill [--max-targets N] [--all]     backlog weave, backend=venice (DIEM)
   promote [--auto]                       apply staged .claude + merge loom-shadow -> master
                                          (--auto: only if the unattended gate allows)
@@ -62,6 +63,9 @@ def main(argv=None) -> int:
     a.add_argument("--max-targets", type=int, default=10)
     a.add_argument("--max-per-target", type=int, default=4)
     a.add_argument("--deadline-seconds", type=float, default=3600.0)
+    # Fraction of the deadline held back for the weave so distill cannot starve it
+    # (it did, silently, for 13 nights ending 2026-07-23). Tunable from cron.
+    a.add_argument("--weave-reserve", type=float, default=0.4)
 
     b = sub.add_parser("backfill")
     b.add_argument("--max-targets", type=int, default=10)
@@ -82,7 +86,8 @@ def main(argv=None) -> int:
     if args.cmd == "absorb":
         summary = absorb(cfg, shadow=not args.live, backend="claude",
                          max_targets=args.max_targets, max_per_target=args.max_per_target,
-                         today=today, deadline_seconds=args.deadline_seconds)
+                         today=today, deadline_seconds=args.deadline_seconds,
+                         weave_reserve=args.weave_reserve)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "backfill":
         cap = 10 ** 9 if args.all else args.max_targets

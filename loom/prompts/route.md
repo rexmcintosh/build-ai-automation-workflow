@@ -6,7 +6,8 @@ Given the learning and the index of existing articles, choose the single best ta
 - Prefer an EXISTING article when the subject already has one.
 - Otherwise propose a new path under the right directory (people/ projects/ places/ companies/
   decisions/ philosophies/ patterns/ skills/ tools/ relationships/).
-- Paths are relative to the wiki root and end in `.md`.
+- Paths are relative to the wiki root and end in `.md`. The wiki root is implicit: never
+  prefix the path with `wiki/` and never start it with `/` or `./`.
 
 Output ONLY a JSON object, no prose, no fences:
 {"target": "<dir>/<slug>.md", "action": "create" | "update", "cross_links": ["<slug>", ...]}

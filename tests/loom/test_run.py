@@ -174,6 +174,66 @@ def test_run_deadline_stops_processing(tmp_path, monkeypatch):
     assert summary["distilled"] == 0          # distill loop broke before processing
 
 
+def test_weave_keeps_a_reserved_slice_of_the_deadline(tmp_path, monkeypatch):
+    """Regression for the 13-night silent stall (2026-07-11..07-23).
+
+    Every nightly `absorb --live` in that window logged deadline_hit=True,
+    committed=0, and a deferred count climbing 176 -> 1152: the distill stage
+    consumed the whole 3600s budget, so _weave_all started with an already-expired
+    clock and deferred every target with reason "run deadline". Nothing was ever
+    woven by the nightly. Distill must not be able to starve the weave.
+    """
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+
+    class D:
+        def complete(self, role, system, user, json_mode=False):
+            return "- type: fact\n  subject: x\n  learning: y\n  route: wiki/people/x"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: D())
+    run_mod.absorb(cfg, shadow=True)                  # sess1 -> distilled, artifact written
+
+    (cfg.projects_dir / "p1" / "sess2.jsonl").write_text(   # something still to distill
+        '{"type":"user","message":{"content":"another"}}\n')
+
+    # start=0, every later reading = 70: past the distill slice (60% of 100) but
+    # still inside the full 100s deadline, so the weave stage must get its turn.
+    calls = {"n": 0}
+    def clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 70.0
+    monkeypatch.setattr(run_mod.time, "monotonic", clock)
+
+    class W:
+        def complete(self, role, system, user, json_mode=False):
+            if role == "route":
+                return '{"target":"people/x.md","action":"create","cross_links":[]}'
+            return "# X\n\nbody.\n"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: W())
+
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude",
+                             deadline_seconds=100, weave_reserve=0.4)
+    assert summary["distilled"] == 0            # distill's slice was spent -> it stopped
+    assert summary["distill_deadline_hit"] is True
+    assert summary["committed"] == 1            # ...and the weave still ran
+    assert (cfg.wiki_worktree / "people" / "x.md").exists()
+
+
+def test_shadow_run_gives_distill_the_whole_deadline(tmp_path, monkeypatch):
+    # No weave happens in shadow mode, so reserving time for it would just waste budget.
+    cfg = _setup(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    calls = {"n": 0}
+    def clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 70.0
+    monkeypatch.setattr(run_mod.time, "monotonic", clock)
+    monkeypatch.setattr(run_mod.llm, "run",
+                        lambda prompt, model, **k: "- type: fact\n  learning: y")
+    summary = run_mod.absorb(cfg, shadow=True, deadline_seconds=100, weave_reserve=0.4)
+    assert summary["distilled"] == 1            # 70 < 100: still inside the full budget
+    assert summary["distill_deadline_hit"] is False
+
+
 def test_cached_route_is_reused_not_recomputed(tmp_path, monkeypatch):
     from loom.ledger import WeaveLedger
     cfg = _live_cfg(tmp_path)

@@ -61,7 +61,8 @@ def _index_listing(wiki: Path) -> str:
 
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
            max_targets: int = 10, today: str = "", deadline_seconds=None,
-           max_per_target: int = 4, distill: bool = True) -> Dict[str, object]:
+           max_per_target: int = 4, distill: bool = True,
+           weave_reserve: float = 0.4) -> Dict[str, object]:
     state = LoomState(cfg.state_path)
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
@@ -70,11 +71,24 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     # "quarantined_learnings" = individual learnings whose weave failed a guard.
     summary = {"distilled": 0, "quarantined": 0, "failed": 0,
                "committed": 0, "deferred": 0, "quarantined_learnings": 0,
-               "deadline_hit": False, "limit_hit": False}
+               "deadline_hit": False, "distill_deadline_hit": False, "limit_hit": False}
 
     start = time.monotonic()
+    def _past(limit) -> bool:
+        return limit is not None and (time.monotonic() - start) > limit
+
     def _expired() -> bool:
-        return deadline_seconds is not None and (time.monotonic() - start) > deadline_seconds
+        return _past(deadline_seconds)
+
+    # Distill gets only part of the budget when a weave follows it. Between 2026-07-11
+    # and 07-23 every nightly `absorb --live` reported deadline_hit=True, committed=0 and
+    # a deferred count growing 176 -> 1152: distilling ~220 sessions ate the entire 3600s,
+    # so _weave_all began already expired and deferred every target. Thirteen nights woven
+    # nothing, silently — the run still exited 0. In shadow mode no weave follows, so
+    # reserving anything there would only waste budget.
+    distill_deadline = deadline_seconds
+    if deadline_seconds is not None and not shadow and weave_reserve:
+        distill_deadline = deadline_seconds * (1.0 - weave_reserve)
 
     # ---------- Stage 1: distill (v0) ----------
     # `distill=False` (used by `backfill`) weaves the already-distilled backlog only — it never
@@ -82,8 +96,9 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     be = get_backend(backend)
     if distill:
         for transcript in find_pending(cfg.projects_dir, state):
-            if _expired():
+            if _past(distill_deadline):
                 summary["deadline_hit"] = True
+                summary["distill_deadline_hit"] = True
                 break
             sid = session_id_for(transcript)
             if _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
