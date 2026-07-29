@@ -29,11 +29,14 @@ warn = 500
 crit = 5000
 
 # --- Layer 1: live process-count budgets -----------------------------------
+# Every writer type counts: lenex pollers, PDF/fragment live writers, and
+# reconcile one-shots. POLLER_MAX=8 slots + the supervisor itself = >10 means
+# something is spawning outside the slot accounting.
 [[processes]]
 name    = "splash.pollers"
-pattern = "poller\\.py"
-warn    = 12
-crit    = 25
+pattern = "poller\\.py|track_pdf_meet|lastheat_ingest|reconcile_meet"
+warn    = 10
+crit    = 16
 
 # --- Layer 2: Supabase row-growth budgets (rows/hour per table) ------------
 [supabase]
@@ -42,3 +45,12 @@ key_env       = "SUPABASE_SERVICE_ROLE_KEY"
 warn_per_hour = 20000
 crit_per_hour = 100000
 tables        = ["results", "splits", "swimmers"]
+
+# --- Layer 3: MeetTrack absence alert (the floor, not a budget) -------------
+# A live-by-date meet whose writer went quiet during racing hours, a live meet
+# the supervisor never launched, or a meet that hit terminal 'failed'.
+# Escalation already routes to Telegram via the investigator agent.
+[meet_freshness]
+stale_warn_min     = 20
+stale_crit_min     = 75
+launch_overdue_min = 30

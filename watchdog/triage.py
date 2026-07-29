@@ -106,6 +106,85 @@ def check_cron_log(name: str, log_text: str, *, tail_lines: int = 50) -> CheckSt
     return CheckStatus(f"cron:{name}", "ok", f"{name} log clean")
 
 
+def _iso_epoch(ts: str | None) -> float | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def check_meet_freshness(rows, now_epoch, *,
+                         stale_warn_min: int = 20, stale_crit_min: int = 75,
+                         launch_overdue_min: int = 30,
+                         racing_start: int = 8, racing_end: int = 22) -> CheckStatus:
+    """The ABSENCE alert MeetTrack never had: every other check fires on 'too
+    much'; a dead poller, a wedged writer, and an idle Saturday all used to
+    look identical to healthy. `rows` is a recent slice of meet_registry.
+
+    - crit  — a meet went 'failed' in the last 24h (its recovery gave up; data
+              is lost until a human intervenes), any hour of the day.
+    - during racing hours (Europe/Lisbon — the registry is POR-scoped):
+      warn/crit — a live-by-date meet with a writer ('polling'/'backfilling')
+              whose last_ingest_at (falling back to the status-change time,
+              covering the never-ingested case) is older than the floor.
+              A long lunch break can trip this; one 6h-cooldown ping during a
+              national championship beats silence — tune from rehearsals.
+      warn  — a live-by-date meet still 'discovered'/'queued' with no status
+              movement for `launch_overdue_min` (the supervisor should have
+              dispatched it within one 5-minute tick).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        local = datetime.fromtimestamp(now_epoch, tz=ZoneInfo("Europe/Lisbon"))
+    except Exception:
+        local = datetime.fromtimestamp(now_epoch, tz=timezone.utc)
+    today = local.date().isoformat()
+    racing = racing_start <= local.hour < racing_end
+
+    failed, stale, unlaunched = [], [], []
+    worst_stale_min = 0.0
+    for r in rows:
+        status = r.get("ingest_status")
+        name = r.get("name") or r.get("sr_meet_id")
+        if status == "failed":
+            upd = _iso_epoch(r.get("updated_at"))
+            if upd is not None and (now_epoch - upd) < 24 * 3600:
+                failed.append(f"{r.get('sr_meet_id')} {name}")
+            continue
+        if not racing:
+            continue
+        start, end = r.get("start_date"), r.get("end_date")
+        live = bool(start) and start <= today and (not end or today <= end)
+        if not live:
+            continue
+        ref = _iso_epoch(r.get("last_ingest_at")) or _iso_epoch(r.get("updated_at"))
+        age_min = (now_epoch - ref) / 60 if ref is not None else None
+        if status in ("polling", "backfilling"):
+            if age_min is not None and age_min >= stale_warn_min:
+                stale.append(f"{r.get('sr_meet_id')} {name} quiet {age_min:.0f}m")
+                worst_stale_min = max(worst_stale_min, age_min)
+        elif status in ("discovered", "queued"):
+            if age_min is not None and age_min >= launch_overdue_min:
+                unlaunched.append(f"{r.get('sr_meet_id')} {name} unlaunched {age_min:.0f}m")
+
+    if failed:
+        return CheckStatus("meets.freshness", "crit",
+                           f"{len(failed)} meet(s) FAILED in the last 24h",
+                           evidence="\n".join(failed[:5]))
+    if stale:
+        level = "crit" if worst_stale_min >= stale_crit_min else "warn"
+        return CheckStatus("meets.freshness", level,
+                           f"{len(stale)} live meet(s) gone quiet during racing hours",
+                           evidence="\n".join(stale[:5]))
+    if unlaunched:
+        return CheckStatus("meets.freshness", "warn",
+                           f"{len(unlaunched)} live meet(s) awaiting launch too long",
+                           evidence="\n".join(unlaunched[:5]))
+    return CheckStatus("meets.freshness", "ok", "live meets fresh (or none live)")
+
+
 # --- triage (escalation + flap suppression) ---------------------------------
 
 def triage(statuses, prior_state, now_epoch, *, cooldown_hours: int = 6) -> dict:

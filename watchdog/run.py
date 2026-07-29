@@ -24,6 +24,7 @@ from .triage import (
     check_bebop_runs,
     check_cron_log,
     check_disk,
+    check_meet_freshness,
     check_service_active,
     triage,
 )
@@ -91,6 +92,20 @@ def _supabase_count(url: str, key: str, table: str) -> int | None:
         return None
 
 
+def _supabase_rows(url: str, key: str, path: str) -> list | None:
+    """Read-only PostgREST GET returning rows. None on any failure — a read we
+    can't make must not crash a poll or fake an alert."""
+    try:
+        import requests
+        r = requests.get(f"{url}/rest/v1/{path}",
+                         headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                         timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception:  # noqa: BLE001 — network/parse error -> skip this check
+        return None
+
+
 def collect_metrics(now_epoch: int, prior_metrics: dict) -> tuple[list[CheckStatus], dict]:
     """Layer 1+2 spike checks. Returns (statuses, new_metrics). new_metrics carries the
     current readings so the next poll can compute Supabase rows/hour deltas."""
@@ -136,6 +151,29 @@ def collect_metrics(now_epoch: int, prior_metrics: dict) -> tuple[list[CheckStat
                 else:  # keep the old reading so a transient failure doesn't reset the baseline
                     if prev is not None:
                         new_metrics[mkey] = prev_rec
+
+    # Layer 3 — the MeetTrack ABSENCE alert: a live meet gone quiet, a meet
+    # awaiting launch too long, or a recent terminal failure. Every other
+    # check here is a spike budget; this is the floor (see check_meet_freshness).
+    mf = cfg.get("meet_freshness")
+    if mf and sb:
+        key = os.environ.get(sb.get("key_env", "SUPABASE_SERVICE_ROLE_KEY"), "")
+        if key:
+            from datetime import datetime, timedelta, timezone as _tz
+            # 'Z' suffix, never '+00:00' — a '+' in a query string is a space.
+            since = (datetime.now(_tz.utc) - timedelta(days=14)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            rows = _supabase_rows(
+                sb["url"], key,
+                "meet_registry?select=sr_meet_id,name,ingest_status,"
+                "last_ingest_at,updated_at,start_date,end_date"
+                f"&updated_at=gt.{since}")
+            if rows is not None:
+                out.append(check_meet_freshness(
+                    rows, now_epoch,
+                    stale_warn_min=mf.get("stale_warn_min", 20),
+                    stale_crit_min=mf.get("stale_crit_min", 75),
+                    launch_overdue_min=mf.get("launch_overdue_min", 30)))
 
     return out, new_metrics
 
