@@ -91,3 +91,94 @@ def test_auto_promote_output_says_what_landed(monkeypatch, capsys):
     assert out["promoted"] is True
     assert out["articles"] == ["a.md", "b.md"]
     assert out["commits"] == 7
+
+
+# ---------------------------------------------------------------- resolve
+
+def _tmp_cfg(tmp_path):
+    from loom.run import Config
+    return Config(projects_dir=tmp_path / "projects", loom_dir=tmp_path / "loom",
+                  state_path=tmp_path / "loom" / "state.json",
+                  wiki_worktree=tmp_path / "shadow", wiki_master=tmp_path / "wiki",
+                  claude_dir=tmp_path / ".claude",
+                  ledger_path=tmp_path / "loom" / "weave_ledger.json")
+
+
+def _quarantined_ledger(cfg, lid="sid#0", target="memory/foo.md"):
+    from loom.ledger import WeaveLedger
+    led = WeaveLedger(cfg.ledger_path)
+    led.plan(lid, target, "append")
+    led.quarantine(lid, "sentinel:priv-write")
+    learnings = cfg.loom_dir / "learnings"
+    learnings.mkdir(parents=True, exist_ok=True)
+    (learnings / "sid.md").write_text(
+        "- type: fact\n  subject: sudo docs\n  learning: >\n    sudoers is documented\n",
+        encoding="utf-8")
+    return led
+
+
+def test_resolve_accept_marks_committed_and_clears_pending(monkeypatch, tmp_path, capsys):
+    from loom.ledger import WeaveLedger
+    cfg = _tmp_cfg(tmp_path)
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    _quarantined_ledger(cfg)
+    rc = cli.main(["resolve", "sid#0", "--accept"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["resolved"] == "sid#0" and out["status"] == "committed"
+    assert out["reason"] == "hand-resolved" and out["was"] == "quarantined"
+    assert out["target"] == "memory/foo.md"
+    assert "sudoers is documented" in out["text"]      # human saw what they resolved
+    led = WeaveLedger(cfg.ledger_path)                  # re-read from disk
+    assert led.status_of("sid#0") == "committed"
+    assert led.entry("sid#0")["reason"] == "hand-resolved"
+    # what `loom pending` builds its decisions from — must now be empty
+    assert led.quarantined() == []
+
+
+def test_resolve_reject_marks_rejected(monkeypatch, tmp_path, capsys):
+    from loom.ledger import WeaveLedger
+    cfg = _tmp_cfg(tmp_path)
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    _quarantined_ledger(cfg)
+    rc = cli.main(["resolve", "sid#0", "--reject"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["status"] == "rejected" and out["reason"] == "hand-rejected"
+    led = WeaveLedger(cfg.ledger_path)
+    assert led.status_of("sid#0") == "rejected"
+    assert led.quarantined() == []
+
+
+def test_resolve_unknown_id_errors_without_writing(monkeypatch, tmp_path, capsys):
+    cfg = _tmp_cfg(tmp_path)
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    rc = cli.main(["resolve", "nope#9", "--accept"])
+    assert rc == 1
+    assert "unknown learning id" in json.loads(capsys.readouterr().out)["error"]
+    assert not cfg.ledger_path.exists()                 # nothing was created
+
+
+def test_resolve_requires_exactly_one_of_accept_reject(monkeypatch, tmp_path):
+    import pytest
+    cfg = _tmp_cfg(tmp_path)
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    with pytest.raises(SystemExit):
+        cli.main(["resolve", "sid#0"])                   # neither flag
+    with pytest.raises(SystemExit):
+        cli.main(["resolve", "sid#0", "--accept", "--reject"])
+
+
+def test_resolve_refuses_non_quarantined_entries(monkeypatch, tmp_path, capsys):
+    """An id typo must never silently rewrite a settled entry (council HIGH)."""
+    from loom.ledger import WeaveLedger
+    cfg = _tmp_cfg(tmp_path)
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    led = WeaveLedger(cfg.ledger_path)
+    led.plan("sid#1", "memory/bar.md", "append")
+    led.mark("sid#1", "committed", reason="woven")
+    rc = cli.main(["resolve", "sid#1", "--reject"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["status"] == "committed"
+    led2 = WeaveLedger(cfg.ledger_path)
+    assert led2.status_of("sid#1") == "committed"       # untouched
+    assert led2.entry("sid#1")["reason"] == "woven"

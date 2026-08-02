@@ -7,6 +7,10 @@
                                          (--auto: only if the unattended gate allows)
   hold [--clear]                         veto tonight's auto-promote (self-expires next day)
   pending                                JSON: what's landing + what needs a decision
+  resolve <sid>#<idx> --accept|--reject  record a HUMAN decision on a quarantined
+                                         learning (accept = landed/landing by hand ->
+                                         committed; reject -> rejected). No model call,
+                                         no wiki write.
   requeue <session_id>                   return a quarantined/stuck session to pending
   rollback --ts <stamp>                  restore ~/.claude from a promote backup
 """
@@ -26,7 +30,7 @@ class _PathEncoder(json.JSONEncoder):
 
 from .autopromote import auto_promote_check, clear_hold, set_hold
 from .ledger import WeaveLedger
-from .pending import cluster_blocked, pending_summary
+from .pending import _learning_block, cluster_blocked, pending_summary
 from .promote import promote, rollback
 from .run import Config, absorb
 from .state import LoomState
@@ -76,6 +80,13 @@ def main(argv=None) -> int:
     pr.add_argument("--auto", action="store_true")
     hd = sub.add_parser("hold"); hd.add_argument("--clear", action="store_true")
     sub.add_parser("pending")
+    rs = sub.add_parser("resolve"); rs.add_argument("learning_id",
+        help="ledger key <session_id>#<idx>, as shown in `loom pending` decisions")
+    rsg = rs.add_mutually_exclusive_group(required=True)
+    rsg.add_argument("--accept", action="store_true",
+                     help="the fact was (or will be) landed by hand -> committed")
+    rsg.add_argument("--reject", action="store_true",
+                     help="the fact should never land -> rejected")
     rq = sub.add_parser("requeue"); rq.add_argument("session_id")
     rb = sub.add_parser("rollback"); rb.add_argument("--ts", required=True)
 
@@ -118,6 +129,34 @@ def main(argv=None) -> int:
         set_hold(cfg.loom_dir, today); print(json.dumps({"hold": today})); return 0
     if args.cmd == "pending":
         print(json.dumps(pending_payload(cfg, today), cls=_PathEncoder)); return 0
+    if args.cmd == "resolve":
+        # Record a human decision on a quarantined learning. Deliberately dumb:
+        # no model call, no wiki write — the human already landed (or vetoed)
+        # the fact; this only makes the ledger agree so `pending` stops asking.
+        led = WeaveLedger(cfg.ledger_path)
+        entry = led.entry(args.learning_id)
+        if not entry:
+            print(json.dumps({"error": f"unknown learning id: {args.learning_id}"}))
+            return 1
+        was = entry.get("status", "")
+        if was != "quarantined":
+            # Typo protection: never silently rewrite an already-settled (or
+            # in-flight) entry — resolve exists for quarantined learnings only.
+            print(json.dumps({"error": f"{args.learning_id} is '{was}', not "
+                              f"quarantined — resolve only clears quarantined "
+                              f"learnings", "status": was}))
+            return 1
+        block = _learning_block(cfg.loom_dir / "learnings", args.learning_id)
+        if args.accept:
+            status, reason = "committed", "hand-resolved"
+        else:
+            status, reason = "rejected", "hand-rejected"
+        led.mark(args.learning_id, status, reason=reason)
+        print(json.dumps({"resolved": args.learning_id, "status": status,
+                          "reason": reason, "target": entry.get("target", ""),
+                          "was": was, "text": block},
+                         cls=_PathEncoder))
+        return 0
     if args.cmd == "requeue":
         # Re-queue a quarantined/stuck session -> next `absorb` re-runs Stage-0 from scratch.
         # (A committed session won't re-weave: git trailers reconcile it back to committed.)
