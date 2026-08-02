@@ -12,6 +12,8 @@ sometimes mid-session). This tool owns the two layers it leaves unmanaged:
 
 Subcommands:
   snapshot   Snapshot dirty claude/* worktrees to refs/wip/* (cron, ~10 min). No-op when clean.
+             Detached-HEAD session worktrees (under .claude/worktrees/) are captured too,
+             under refs/wip/detached/<short-sha>-<pathdigest>/<ts>.
   sweep      Classify orphan claude/* branches; delete Tier A; report B/C. Dry-run unless --apply.
   report     Print the latest sweep report (read-only).
   restore    Recreate a deleted branch from the undo journal, or list WIP snapshots.
@@ -27,7 +29,9 @@ Safety invariants (enforced below, tagged I1..I9):
       branch checked out in any worktree, which is the live-session guard we rely on.
   I5  Creation-race grace: never delete a branch whose ref is younger than GRACE.
   I6  Journal every deletion before it happens ("recoverable via reflog" is FALSE
-      because `git branch -d` deletes the branch's reflog with it).
+      because `git branch -d` deletes the branch's reflog with it). If the delete is
+      then refused, a `<tier>-refused` marker row is appended so the journal never
+      claims a deletion that did not happen; `restore` treats such rows as no-ops.
   I7  Fail closed per repo: any ambiguity (default branch, parse, git error) -> skip + report.
   I8  Tier C (genuinely unmerged) is structurally report-only. No flag deletes it.
   I9  One run at a time (lockfile); address git via the main checkout, never cwd.
@@ -37,6 +41,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import glob
+import hashlib
 import os
 import shutil
 import subprocess
@@ -208,7 +213,12 @@ def ensure_state() -> None:
 
 
 def journal(repo: str, branch: str, sha: str, tier: str) -> None:
-    """Append-only undo record, written BEFORE deletion (I6)."""
+    """Append-only undo record, written BEFORE deletion (I6).
+
+    When a journaled delete is subsequently REFUSED by git, the caller appends a
+    second row with tier `<tier>-refused` (see cmd_sweep). The record-before-act
+    property of I6 is preserved, while the journal's latest row for a branch
+    always reflects what actually happened."""
     ensure_state()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(JOURNAL_PATH, "a") as fh:
@@ -238,9 +248,18 @@ def now_utc_stamp() -> str:
 
 # ----------------------------------------------------------------------------- snapshot
 
+def _is_session_worktree(path: str) -> bool:
+    """True when the worktree lives under some repo's .claude/worktrees/ — the
+    harness's session-worktree home. Used to scope detached-HEAD snapshots to
+    session worktrees only."""
+    return f"{os.sep}.claude{os.sep}worktrees{os.sep}" in path
+
+
 def cmd_snapshot(args) -> int:
     """Snapshot every dirty claude/* worktree to refs/wip/<branch>/<ts> using a TEMP
-    index so the session's own index/HEAD/files are never touched (I1)."""
+    index so the session's own index/HEAD/files are never touched (I1). Dirty
+    DETACHED-HEAD session worktrees (no branch to key on) are snapshotted under
+    refs/wip/detached/<short-sha>-<pathdigest>/<ts>."""
     with RunLock():
         ensure_state()
         snapped = 0
@@ -252,15 +271,28 @@ def cmd_snapshot(args) -> int:
             for wt in worktrees:
                 branch = wt.get("branch")
                 path = wt.get("path")
-                if not branch or not branch.startswith(BRANCH_PREFIX) or not path:
+                if not path or not os.path.isdir(path):
                     continue
-                if not os.path.isdir(path):
+                if branch:
+                    if not branch.startswith(BRANCH_PREFIX):
+                        continue
+                elif not (wt.get("detached") and _is_session_worktree(path)):
+                    # Detached HEAD outside .claude/worktrees/ is a human experiment,
+                    # not a session — leave it alone.
                     continue
                 try:
                     dirty = bool(git(path, "status", "--porcelain").strip())
                     if not dirty:
                         continue
                     head = git(path, "rev-parse", "HEAD").strip()
+                    # Detached session worktrees have no branch name; key their WIP
+                    # refs by parked sha + a path digest, so two detached sessions
+                    # on the SAME commit can never collide on one ref.
+                    if branch:
+                        label = branch
+                    else:
+                        pdig = hashlib.sha1(path.encode()).hexdigest()[:8]
+                        label = f"detached/{head[:12]}-{pdig}"
                     # I1: a private, NON-EXISTENT index path (git rejects an existing
                     # 0-byte index). git creates it fresh; the session's real index is
                     # never touched. Clean it up with the temp dir afterwards.
@@ -279,7 +311,7 @@ def cmd_snapshot(args) -> int:
                             path, "commit-tree", tree, "-p", head,
                             "-m", f"session-gc wip snapshot {stamp}", env=env,
                         ).strip()
-                        ref = f"{WIP_PREFIX}{branch}/{stamp.replace(':', '').replace('-', '')}"
+                        ref = f"{WIP_PREFIX}{label}/{stamp.replace(':', '').replace('-', '')}"
                         git(repo, "update-ref", ref, commit)  # I2
                         snapped += 1
                     finally:
@@ -287,7 +319,7 @@ def cmd_snapshot(args) -> int:
                 except GitError as e:
                     # I7: never let one worktree abort the sweep — but surface it
                     # (cron logs) so a silent-swallow can't hide a real failure again.
-                    print(f"session-gc snapshot: skipped {branch} in "
+                    print(f"session-gc snapshot: skipped {branch or path} in "
                           f"{os.path.basename(repo)}: {e}", file=sys.stderr)
                     continue
             _expire_wip(repo)
@@ -372,6 +404,7 @@ def cmd_sweep(args) -> int:
                             lines.append(f"- `{b}` — DELETED (Tier A, merged)")
                             totals["A_deleted"] += 1
                         else:
+                            journal(repo, b, sha, "A-refused")  # I6: journal must not claim a delete that never happened
                             lines.append(f"- `{b}` — KEPT (Tier A; `-D` refused — now checked out by a live worktree)")
                     else:
                         lines.append(f"- `{b}` — would delete (Tier A, merged)")
@@ -384,6 +417,7 @@ def cmd_sweep(args) -> int:
                         if git_ok(repo, "branch", "-D", b):  # content-merge proven above
                             lines.append(f"- `{b}` — DELETED (Tier B, content-merged)")
                         else:
+                            journal(repo, b, sha, "B-refused")  # I6: mark the non-delete
                             lines.append(f"- `{b}` — KEPT (Tier B; `-D` refused; review)")
                     else:
                         gate = "" if old_enough else " (<14d, held)"
@@ -443,6 +477,23 @@ def cmd_restore(args) -> int:
         print(f"session-gc: no journal entry for {args.branch}")
         return 1
     ts, repo, branch, sha, tier = matches[-1]  # most recent
+    if tier.endswith("-refused"):
+        if git_ok(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+            print(f"session-gc: last journal entry for {branch} is a refused delete "
+                  f"(the branch was never deleted); nothing to restore.")
+            return 1
+        # Refused by session-gc but gone anyway (deleted later by hand/another
+        # tool): fall back to the most recent real deletion record.
+        real = [r for r in matches if not r[4].endswith("-refused")]
+        if not real:
+            print(f"session-gc: {branch} is gone but the journal has only "
+                  f"refused-delete rows for it; cannot restore.")
+            return 1
+        ts, repo, branch, sha, tier = real[-1]
+    if git_ok(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+        print(f"session-gc: {branch} already exists in {os.path.basename(repo)}; "
+              f"nothing to restore.")
+        return 1
     if not git_ok(repo, "cat-file", "-e", sha):
         print(f"session-gc: object {sha} is gone from {repo}; cannot restore.")
         return 1
