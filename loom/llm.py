@@ -31,8 +31,23 @@ _SETTINGS_PATH = str(Path(__file__).parent / "headless-settings.json")
 _EMPTY_MCP_PATH = str(Path(__file__).parent / "headless-mcp.json")
 
 
+# Cron runs with PATH=/usr/bin:/bin, and the claude CLI moved to ~/.local/bin in the
+# 2026-07-25 installer migration — so a bare which() miss must probe known install dirs.
+_FALLBACK_BINS = (
+    Path.home() / ".local" / "bin" / "claude",
+    Path("/usr/local/bin/claude"),
+    Path("/usr/bin/claude"),
+)
+
+
 def _claude_bin() -> str:
-    return shutil.which("claude") or "/usr/bin/claude"
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in _FALLBACK_BINS:
+        if candidate.is_file():
+            return str(candidate)
+    return "claude"
 
 
 def build_argv(model: str, allowed_tools: Optional[Sequence[str]] = None,

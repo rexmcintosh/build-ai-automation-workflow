@@ -10,6 +10,11 @@
 # branch flips never disturb them. Install this script's path from RUNTIME in cron.
 set -uo pipefail
 
+# Cron's PATH is /usr/bin:/bin, but the claude CLI lives in ~/.local/bin since the
+# 2026-07-25 installer migration. Without this, every LLM call (and the Telegram
+# failure ping below) dies with FileNotFoundError — the 2026-07-26..08-01 outage.
+export PATH="$HOME/.local/bin:$PATH"
+
 # RUNTIME = this script's clone (pinned to main). DATA_REPO = shared repo (state/ledger/logs).
 RUNTIME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_REPO="/home/dev/projects/build-ai-automation-workflow"
@@ -76,16 +81,34 @@ PY
 # ⚠️ STALE" nightly for 8 days and was never acted on. The daily report now rides
 # in the 07:00 Bebop briefing — the one stream Rex actually reads. Failures still
 # ping, so silence never hides a break.
-if [ "$RC" -ne 0 ] || [ "$PRC" -ne 0 ]; then
-  MSG="$("$PY" - "$RC" "$PRC" <<'PY' 2>/dev/null
-import sys
-from loom.summary import scrub
-rc, prc = sys.argv[1], sys.argv[2]
-what = "absorb" if rc != "0" else "promote"
-print(scrub(f"⚠️ Loom {what} failed (absorb rc={rc}, promote rc={prc}). Check loom/logs/."))
+#
+# "Failure" includes the silent kind: absorb can exit 0 while every distill call
+# errors (0 distilled, N failed — the 2026-07-26..08-01 outage shape). Treat a
+# night that tried sessions and distilled none of them as a failure too.
+SILENT_FAIL="$("$PY" - "$OUT" <<'PY' 2>/dev/null
+import json, sys
+try:
+    s = json.loads(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else {}
+except json.JSONDecodeError:
+    s = {}
+print(s.get("failed", 0) if s.get("failed", 0) > 0 and s.get("distilled", 0) == 0 else "")
 PY
 )"
-  [ -z "$MSG" ] && MSG="⚠️ Loom failed (absorb rc=$RC, promote rc=$PRC). Check loom/logs/."
+if [ "$RC" -ne 0 ] || [ "$PRC" -ne 0 ] || [ -n "$SILENT_FAIL" ]; then
+  MSG="$("$PY" - "$RC" "$PRC" "$SILENT_FAIL" <<'PY' 2>/dev/null
+import sys
+from loom.summary import scrub
+rc, prc, silent = sys.argv[1], sys.argv[2], sys.argv[3]
+if rc != "0" or prc != "0":
+    what = "absorb" if rc != "0" else "promote"
+    msg = f"⚠️ Loom {what} failed (absorb rc={rc}, promote rc={prc}). Check loom/logs/."
+else:
+    msg = (f"⚠️ Loom distilled 0 sessions but {silent} attempts failed (rc=0). "
+           "Likely claude binary/PATH breakage. Check loom/logs/runs.log.err.")
+print(scrub(msg))
+PY
+)"
+  [ -z "$MSG" ] && MSG="⚠️ Loom failed (absorb rc=$RC, promote rc=$PRC, failed=${SILENT_FAIL:-?}). Check loom/logs/."
   PROMPT="Send a Telegram message to chat_id ${CHAT_ID} with text: ${MSG} Output only SENT or FAILED."
   claude -p "$PROMPT" \
     --model haiku --allowedTools mcp__plugin_telegram_telegram__reply \
