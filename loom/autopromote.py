@@ -16,12 +16,34 @@ Two things it must refuse, or the trade stops being safe:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .promote import _git, _shadow_has_stage
 
 HOLD_FILE = ".hold"
+
+# The nightly promote fires at 02:00 UTC (cron `0 2 * * *`; runs.log shows it as
+# 03:00:01+01:00). Its `today` string is the LOCAL date at that instant, which for
+# any plausible local offset here equals the UTC date of this boundary.
+PROMOTE_UTC_HOUR = 2
+
+
+def next_promote_date(now: Optional[datetime] = None) -> str:
+    """The `today` string the NEXT unattended promote will run with.
+
+    A hold must name the promote it is meant to stop, not the day it was set:
+    a veto typed at 07:00 on day D targets the 02:00-UTC run on day D+1, which
+    compares against today == D+1. Anything set before that day's boundary
+    (00:00-02:00 UTC) still targets the same day's run."""
+    # A naive `now` (tests, callers) is interpreted as host-local time —
+    # astimezone() does exactly that — then normalized to UTC.
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    boundary = now.replace(hour=PROMOTE_UTC_HOUR, minute=0, second=0, microsecond=0)
+    if now >= boundary:                      # today's run already fired -> tomorrow's
+        boundary += timedelta(days=1)
+    return boundary.strftime("%Y-%m-%d")
 
 
 def _hold_path(loom_dir: Path) -> Path:
@@ -29,11 +51,19 @@ def _hold_path(loom_dir: Path) -> Path:
 
 
 def set_hold(loom_dir: Path, day: str) -> Path:
-    """Veto tonight's promote. Scoped to ONE day on purpose: a hold that persisted
-    silently would recreate the 8-day drift this whole design exists to fix."""
+    """Veto ONE promote. `day` is the target promote's date — callers should pass
+    next_promote_date(), never the calendar day the veto was typed (that was the
+    off-by-one that left auto-promote with no working brake). Scoped to one run
+    on purpose: a hold that persisted silently would recreate the 8-day drift
+    this whole design exists to fix."""
     p = _hold_path(loom_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(day.strip() + "\n", encoding="utf-8")
+    # Atomic: a crash mid-write must not leave a truncated .hold, because
+    # is_held treats malformed/empty as no-hold — i.e. it would silently
+    # disable the exact brake this file exists to be.
+    tmp = p.with_suffix(".hold.tmp")
+    tmp.write_text(day.strip() + "\n", encoding="utf-8")
+    tmp.replace(p)
     return p
 
 

@@ -90,15 +90,24 @@ def _learning_block(learnings_dir: Path, lid: str) -> str:
         return ""
 
 
-def pending_summary(*, wiki_root, ledger_path, learnings_dir, loom_dir, today) -> dict:
+def pending_summary(*, wiki_root, ledger_path, learnings_dir, loom_dir,
+                    today=None, promote_target=None) -> dict:
     """Everything waiting on a human, in one payload. Shared by the briefing line
-    and the review page so the two can never disagree about what's pending."""
-    from .autopromote import auto_promote_check, is_held      # local: avoid import cycle
+    and the review page so the two can never disagree about what's pending.
+
+    `held` / `would_promote` describe the NEXT promote run (02:00 UTC), so the
+    hold comparison uses next_promote_date(), not the calling day — a hold set
+    at 07:00 targets tomorrow's run and must show as held all day. `today` is
+    kept for caller compatibility but no longer drives the hold check;
+    `promote_target` lets tests inject the target date."""
+    from .autopromote import auto_promote_check, is_held, next_promote_date  # local: avoid import cycle
     from .ledger import WeaveLedger
     from .promote import _git
 
+    del today                                                  # see docstring
+    target = promote_target or next_promote_date()
     wiki_root = Path(wiki_root)
-    check = auto_promote_check(wiki_root=wiki_root, loom_dir=loom_dir, today=today)
+    check = auto_promote_check(wiki_root=wiki_root, loom_dir=loom_dir, today=target)
 
     added = set()
     try:
@@ -129,7 +138,7 @@ def pending_summary(*, wiki_root, ledger_path, learnings_dir, loom_dir, today) -
         "new": sum(1 for a in articles if a["new"]),
         "updated": sum(1 for a in articles if not a["new"]),
         "decisions": cluster_blocked(blocked),
-        "held": is_held(loom_dir, today),
+        "held": is_held(loom_dir, target),
         "staged_claude": check["staged"],
         "would_promote": check["go"],
     }

@@ -28,7 +28,7 @@ class _PathEncoder(json.JSONEncoder):
             return str(o)
         return super().default(o)
 
-from .autopromote import auto_promote_check, clear_hold, set_hold
+from .autopromote import auto_promote_check, clear_hold, next_promote_date, set_hold
 from .ledger import WeaveLedger
 from .pending import _learning_block, cluster_blocked, pending_summary
 from .promote import promote, rollback
@@ -126,7 +126,10 @@ def main(argv=None) -> int:
     if args.cmd == "hold":
         if args.clear:
             clear_hold(cfg.loom_dir); print(json.dumps({"hold": None})); return 0
-        set_hold(cfg.loom_dir, today); print(json.dumps({"hold": today})); return 0
+        # Store the date of the promote this veto must stop (the next 02:00-UTC
+        # run), NOT today's date — a 07:00 veto targets tomorrow's `today`.
+        target = next_promote_date()
+        set_hold(cfg.loom_dir, target); print(json.dumps({"hold": target})); return 0
     if args.cmd == "pending":
         print(json.dumps(pending_payload(cfg, today), cls=_PathEncoder)); return 0
     if args.cmd == "resolve":

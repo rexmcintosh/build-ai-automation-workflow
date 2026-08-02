@@ -113,11 +113,23 @@ def test_pending_summary_surfaces_decisions_not_raw_rows(wiki, tmp_path):
 
 
 def test_pending_summary_reports_hold_state(wiki, tmp_path):
+    """`held` describes the NEXT promote (the run a veto targets), not the
+    calling day — a hold set at 07:00 must show as held all day."""
     from loom.autopromote import set_hold
-    loom = tmp_path / "loom"; set_hold(loom, "2026-07-21")
+    loom = tmp_path / "loom"; set_hold(loom, "2026-07-22")   # target = next run
     s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
-                        learnings_dir=tmp_path / "learnings", loom_dir=loom, today="2026-07-21")
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21", promote_target="2026-07-22")
     assert s["held"] is True
+
+
+def test_pending_summary_hold_for_a_past_promote_is_expired(wiki, tmp_path):
+    from loom.autopromote import set_hold
+    loom = tmp_path / "loom"; set_hold(loom, "2026-07-21")   # already consumed
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        promote_target="2026-07-22")
+    assert s["held"] is False
 
 
 # --- briefing_line: the ONE line that rides in the 07:00 Bebop briefing ---

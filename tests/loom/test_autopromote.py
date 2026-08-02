@@ -91,3 +91,71 @@ def test_untracked_junk_also_stands_down(wiki, tmp_path):
     (wiki / "scratch.txt").write_text("stray\n")
     r = auto_promote_check(wiki_root=wiki, loom_dir=tmp_path / "loom", today="2026-07-21")
     assert r["go"] is False and r["reason"] == "wiki-dirty"
+
+
+# --- the off-by-one-day fix: a hold names the promote it stops ---------------
+from datetime import datetime, timedelta, timezone
+from loom.autopromote import next_promote_date
+
+_LOCAL = timezone(timedelta(hours=1))       # the +01:00 the cron logs run in
+
+
+def test_hold_set_at_0700_stops_the_next_promote_and_nothing_later(wiki, tmp_path):
+    """The live bug: a veto typed at 07:00 on day D stored 'D', but the promote
+    it targeted runs at 02:00 UTC on D+1 with today == 'D+1' — never matching.
+    The hold must store the TARGET promote's date."""
+    loom = tmp_path / "loom"
+    typed_at = datetime(2026, 7, 23, 7, 0, tzinfo=_LOCAL)          # 07:00 local, day D
+    target = next_promote_date(typed_at)
+    assert target == "2026-07-24"                                   # D+1, tomorrow's run
+    set_hold(loom, target)
+    # the promote it was meant to stop (cli passes today = local date at 02:00 UTC)
+    r = auto_promote_check(wiki_root=wiki, loom_dir=loom, today="2026-07-24")
+    assert r["go"] is False and r["reason"] == "hold"
+    # ...and nothing later: self-expiry survives the fix
+    assert auto_promote_check(wiki_root=wiki, loom_dir=loom, today="2026-07-25")["go"] is True
+
+
+def test_hold_set_in_predawn_window_stops_that_same_days_promote():
+    """00:00-02:00 UTC (before the boundary) still targets the SAME day's run —
+    the only window the old code handled correctly."""
+    predawn = datetime(2026, 7, 23, 0, 30, tzinfo=timezone.utc)
+    assert next_promote_date(predawn) == "2026-07-23"
+
+
+def test_next_promote_date_crosses_utc_midnight():
+    """23:30 UTC on day D is already past D's boundary — target is D+1."""
+    late = datetime(2026, 7, 23, 23, 30, tzinfo=timezone.utc)
+    assert next_promote_date(late) == "2026-07-24"
+
+
+def test_next_promote_date_local_predawn_maps_to_utc_correctly():
+    """01:00 local (+01:00) on day D is 00:00 UTC — still before D's boundary."""
+    local_predawn = datetime(2026, 7, 23, 1, 0, tzinfo=_LOCAL)
+    assert next_promote_date(local_predawn) == "2026-07-23"
+
+
+def test_next_promote_date_at_exact_boundary_targets_tomorrow():
+    """A hold set at the very instant the run fires cannot stop it (the cron
+    triggers one second later); it targets the following night."""
+    boundary = datetime(2026, 7, 23, 2, 0, 0, tzinfo=timezone.utc)
+    assert next_promote_date(boundary) == "2026-07-24"
+
+
+def test_cli_hold_stores_the_target_promote_date(monkeypatch, tmp_path, capsys):
+    """`loom hold` must write next_promote_date(), never today's date."""
+    import json as _json
+    from loom import cli
+    from loom.run import Config
+    cfg = Config(projects_dir=tmp_path / "p", loom_dir=tmp_path / "loom",
+                 state_path=tmp_path / "loom" / "state.json",
+                 wiki_worktree=tmp_path / "shadow", wiki_master=tmp_path / "wiki",
+                 claude_dir=tmp_path / ".claude",
+                 ledger_path=tmp_path / "loom" / "weave_ledger.json")
+    monkeypatch.setattr(cli, "default_config", lambda: cfg)
+    monkeypatch.setattr(cli, "next_promote_date", lambda now=None: "2026-07-24")
+    assert cli.main(["hold"]) == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert out["hold"] == "2026-07-24"
+    assert is_held(cfg.loom_dir, "2026-07-24") is True
+    assert is_held(cfg.loom_dir, "2026-07-23") is False
