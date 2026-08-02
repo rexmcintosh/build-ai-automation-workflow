@@ -48,23 +48,98 @@ def test_review_diff_runs_in_repo(tmp_path):
     assert fr.calls[0]["argv"] == ["council", "review", "--diff", "--format", "md"]
 
 def test_review_range_pipes_git_diff_to_stdin(tmp_path):
-    fr = FakeRun(results=[(0, "THE DIFF"), (0, "verdict")])
+    # call 0: cat-file base-exists check (ok) — baseline intact, no heal
+    fr = FakeRun(results=[(0, ""), (0, "THE DIFF"), (0, "verdict")])
     it = new_item("review", {"repo": "/r/swim", "range": "a..b", "head": "b"},
+                  created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=fr, clock=lambda: 0.0)
+    assert res.ok and res.note is None
+    assert fr.calls[0]["argv"] == ["git", "-C", "/r/swim", "cat-file", "-e",
+                                   "a^{commit}"]
+    assert fr.calls[1]["argv"] == ["git", "-C", "/r/swim", "diff", "a..b"]
+    assert fr.calls[2]["argv"] == ["council", "review", "-", "--format", "md"]
+    assert fr.calls[2]["input"] == "THE DIFF"
+
+def test_review_range_empty_diff_short_circuits(tmp_path):
+    fr = FakeRun(results=[(0, ""), (0, "")])  # cat-file ok, empty diff
+    it = new_item("review", {"repo": "/r/swim", "range": "a..b", "head": "b"},
+                  created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=fr, clock=lambda: 0.0)
+    assert res.ok and len(fr.calls) == 2  # council never called on empty diff
+
+def test_review_range_vanished_base_heals_to_merge_base(tmp_path):
+    """A base SHA rewritten out of history (rebase/squash/force-push) must not
+    produce the perpetual Invalid-revision-range failure: the runner re-anchors
+    the diff to the merge-base with the default branch and reviews that."""
+    fr = FakeRun(results=[
+        (1, ""),                              # cat-file base: GONE
+        (0, ""),                              # rev-parse HEAD: repo healthy
+        (0, ""),                              # cat-file head: exists
+        (0, "refs/remotes/origin/main\n"),    # symbolic-ref origin/HEAD
+        (0, "mbase\n"),                       # merge-base
+        (0, "HEALED DIFF"),                   # git diff mbase..b
+        (0, "verdict"),                       # council review
+    ])
+    it = new_item("review", {"repo": "/r/swim", "range": "gone..b", "head": "b"},
                   created=NOW)
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=fr, clock=lambda: 0.0)
     assert res.ok
-    assert fr.calls[0]["argv"] == ["git", "-C", "/r/swim", "diff", "a..b"]
-    assert fr.calls[1]["argv"] == ["council", "review", "-", "--format", "md"]
-    assert fr.calls[1]["input"] == "THE DIFF"
+    assert res.note and "healed" in res.note and "gone" in res.note
+    assert fr.calls[4]["argv"] == ["git", "-C", "/r/swim", "merge-base",
+                                   "refs/remotes/origin/main", "b"]
+    assert fr.calls[5]["argv"] == ["git", "-C", "/r/swim", "diff", "mbase..b"]
+    assert fr.calls[6]["input"] == "HEALED DIFF"
 
-def test_review_range_empty_diff_short_circuits(tmp_path):
-    fr = FakeRun(results=[(0, "")])
+def test_review_range_vanished_base_no_default_branch_resets_to_head(tmp_path):
+    """No resolvable default branch: heal degrades to head..head — an empty
+    diff, returned ok so the drain advances the baseline to head."""
+    fr = FakeRun(results=[
+        (1, ""),   # cat-file base: GONE
+        (0, ""),   # rev-parse HEAD: repo healthy
+        (0, ""),   # cat-file head: exists
+        (1, ""),   # symbolic-ref origin/HEAD: none
+        (1, ""),   # merge-base refs/heads/main: fails
+        (1, ""),   # merge-base refs/heads/master: fails
+        (0, ""),   # git diff b..b: empty
+    ])
+    it = new_item("review", {"repo": "/r/swim", "range": "gone..b", "head": "b"},
+                  created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=fr, clock=lambda: 0.0)
+    assert res.ok and res.note and "healed" in res.note
+    assert fr.calls[6]["argv"] == ["git", "-C", "/r/swim", "diff", "b..b"]
+    assert len(fr.calls) == 7  # nothing to review — council never called
+
+def test_review_range_unreachable_repo_stays_fail_closed(tmp_path):
+    fr = FakeRun(results=[
+        (1, ""),   # cat-file base: fails
+        (1, ""),   # rev-parse HEAD: fails — repo is genuinely broken/gone
+    ])
+    it = new_item("review", {"repo": "/r/gone", "range": "a..b", "head": "b"},
+                  created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
+                   run=fr, clock=lambda: 0.0)
+    assert not res.ok and "unreachable" in res.error
+    assert len(fr.calls) == 2  # never attempted a diff or a heal
+
+def test_review_range_vanished_head_fails_for_rediscovery(tmp_path):
+    """Head rewritten too: fail the item (an ok would record the dead head as
+    the new baseline); the next discovery re-mints from the current HEAD and
+    the base-side heal then applies."""
+    fr = FakeRun(results=[
+        (1, ""),   # cat-file base: GONE
+        (0, ""),   # rev-parse HEAD: repo healthy
+        (1, ""),   # cat-file head: GONE too
+    ])
     it = new_item("review", {"repo": "/r/swim", "range": "a..b", "head": "b"},
                   created=NOW)
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=fr, clock=lambda: 0.0)
-    assert res.ok and len(fr.calls) == 1  # council never called on empty diff
+    assert not res.ok and "re-discover" in res.error
+    assert len(fr.calls) == 3
 
 def test_images_payload_command_ignored(tmp_path):
     """Payload-supplied command must never be honored — argv comes solely
@@ -147,3 +222,27 @@ def test_images_non_dict_standing_order_fails_cleanly(tmp_path):
     res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0,
                    run=FakeRun(), clock=lambda: 0.0)
     assert not res.ok and res.error == "images item has no command and no standing order"
+
+def test_review_range_heals_against_real_git_repo(tmp_path):
+    """End-to-end with real git: a recorded base SHA that no longer exists in
+    the repo (rewritten history) yields a healed ok result, not the
+    Invalid-revision-range failure."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def g(*args):
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              capture_output=True, text=True, check=True)
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (repo / "f.txt").write_text("one\n")
+    g("add", "f.txt")
+    g("commit", "-qm", "c1")
+    head = g("rev-parse", "HEAD").stdout.strip()
+    vanished = "0" * 40  # a SHA that never existed here — as after a rebase
+    it = new_item("review", {"repo": str(repo),
+                             "range": f"{vanished}..{head}", "head": head},
+                  created=NOW)
+    res = run_item(it, _cfg(tmp_path), {}, deadline_epoch=10_000.0)
+    assert res.ok
+    assert res.note and "healed" in res.note and vanished[:12] in res.note

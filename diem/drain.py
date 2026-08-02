@@ -150,10 +150,15 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
             entry = {"id": picked.id, "type": picked.type, "ok": res.ok,
                      "cost": cost, "duration_s": res.duration_s,
                      "output_path": res.output_path, "error": res.error}
+            if getattr(res, "note", None):  # e.g. a healed review baseline
+                entry["note"] = res.note
             summary["ran"].append(entry)
             if res.ok:
-                queue.archive(picked, {"ok": True, "cost": cost,
-                                       "output_path": res.output_path})
+                meta = {"ok": True, "cost": cost,
+                        "output_path": res.output_path}
+                if getattr(res, "note", None):
+                    meta["note"] = res.note  # durable: heals stay queryable
+                queue.archive(picked, meta)
                 if picked.type == "review" and picked.payload.get("head"):
                     reviewed.set(picked.payload["repo"], picked.payload["head"])
             else:
