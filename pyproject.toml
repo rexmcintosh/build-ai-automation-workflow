@@ -1,6 +1,6 @@
 [project]
 name = "council"
-version = "0.4.0"
+version = "0.5.0"
 description = "Multi-model Venice AI council: ask / review / panels"
 requires-python = ">=3.11"
 dependencies = ["requests>=2.31"]
@@ -10,6 +10,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 council = "council.cli:main"
+council-ci-review = "council.ci_review:main"
 diem = "diem.cli:main"
 session-gc = "sessiongc.cli:main"
 venice-usage = "venice_usage.cli:main"
