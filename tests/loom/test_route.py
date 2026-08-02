@@ -131,3 +131,66 @@ def test_suggested_route_traversal_is_refused():
     b = _Backend("garbage")
     r = confirm_route(b, {"learning": "y", "route": "wiki/../../etc/passwd"}, index_listing="")
     assert r is None
+
+
+# --- top-level directory guard --------------------------------------------
+# `etc/passwd.md` used to happily mint ~/wiki/etc/ — the same silent-new-tree
+# bug class as wiki/wiki/. With a wiki_root, a target whose top-level dir does
+# not already exist is refused; root-level files and existing dirs still pass.
+# (A prompt-derived allow-list was rejected: the live ledger routes to memory/,
+# reference/, feedback/, procedures/ and 67 root-level files.)
+import pytest
+from loom.route import normalize_target
+
+
+@pytest.fixture
+def wiki(tmp_path):
+    for d in ("people", "tools", "memory"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "glossary.md").write_text("# glossary\n")
+    return tmp_path
+
+
+def test_refuses_target_in_nonexistent_toplevel_dir(wiki):
+    assert normalize_target("etc/passwd.md", wiki) is None
+
+
+def test_allows_target_in_existing_dir(wiki):
+    assert normalize_target("people/liam.md", wiki) == "people/liam.md"
+
+
+def test_allows_root_level_file(wiki):
+    assert normalize_target("new-note.md", wiki) == "new-note.md"
+
+
+def test_allows_new_subdir_under_existing_toplevel(wiki):
+    # only the TOP level is guarded; deeper structure under a known dir is fine
+    assert normalize_target("tools/sub/new.md", wiki) == "tools/sub/new.md"
+
+
+def test_without_wiki_root_stays_a_pure_string_check():
+    assert normalize_target("etc/passwd.md") == "etc/passwd.md"
+
+
+def test_wiki_prefix_still_stripped_before_the_dir_check(wiki):
+    assert normalize_target("wiki/people/liam.md", wiki) == "people/liam.md"
+
+
+def test_confirm_route_refuses_new_toplevel_and_falls_back(wiki):
+    b = _Backend('{"target": "etc/passwd.md", "action": "update"}')
+    r = confirm_route(b, _LEARNING, index_listing="", wiki_root=wiki)
+    assert r["target"] == "people/liam.md"          # fell back to the suggestion
+
+
+def test_confirm_route_defers_when_suggestion_is_new_toplevel_too(wiki):
+    b = _Backend("garbage")
+    r = confirm_route(b, {"learning": "y", "route": "brandnew/x"},
+                      index_listing="", wiki_root=wiki)
+    assert r is None                                 # caller defers — no crash
+
+
+def test_refused_new_toplevel_is_logged(wiki, caplog):
+    b = _Backend('{"target": "etc/passwd.md", "action": "update"}')
+    with caplog.at_level("WARNING"):
+        confirm_route(b, {"learning": "y"}, index_listing="", wiki_root=wiki)
+    assert "etc/passwd.md" in caplog.text

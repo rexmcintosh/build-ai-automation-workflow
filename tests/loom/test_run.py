@@ -73,6 +73,7 @@ def _live_cfg(tmp_path):
     wiki = tmp_path / "wiki"; wiki.mkdir()
     _git(wiki, "init", "-q"); _git(wiki, "config", "user.email", "t@t"); _git(wiki, "config", "user.name", "t")
     (wiki / "_index.md").write_text("# RexBrain — Master Index\n\n## People\n")
+    (wiki / "people").mkdir()      # routes may only land in EXISTING top-level dirs
     _git(wiki, "add", "-A"); _git(wiki, "commit", "-qm", "seed"); _git(wiki, "checkout", "-qb", "loom-shadow")
     return run_mod.Config(
         projects_dir=projects,
@@ -305,3 +306,29 @@ def test_usage_limit_in_weave_is_caught(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
     summary = run_mod.absorb(cfg, shadow=False, backend="claude")   # must not raise
     assert summary["limit_hit"] is True
+
+
+def test_poisoned_cached_route_cannot_mint_a_new_toplevel_dir(tmp_path, monkeypatch):
+    """The reuse path must re-validate: a cached target planned before the
+    top-level-dir guard existed (or poisoned) may not bypass it (council HIGH)."""
+    from loom.ledger import WeaveLedger
+    cfg = _live_cfg(tmp_path)
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    class D:
+        def complete(self, role, system, user, json_mode=False):
+            assert role == "distill"
+            return "- type: fact\n  subject: x\n  learning: y\n  route: wiki/people/x"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: D())
+    run_mod.absorb(cfg, shadow=True)
+    # poisoned cache: routes into a top-level dir that does not exist
+    WeaveLedger(cfg.ledger_path).plan("sess1#0", "etc/passwd.md", "create")
+    class W:
+        def complete(self, role, system, user, json_mode=False):
+            if role == "route":   # re-route is ALLOWED for a refused cached target
+                return '{"target":"people/x.md","action":"create","cross_links":[]}'
+            return "# X\n\nbody.\n"
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: W())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", distill=False)
+    assert not (cfg.wiki_worktree / "etc").exists()          # never minted
+    assert summary["committed"] == 1
+    assert (cfg.wiki_worktree / "people" / "x.md").exists()  # healed via re-route

@@ -20,7 +20,7 @@ from .gate import scan_clean
 from .gitio import ShadowRepo
 from .indexer import rebuild_backlinks, upsert_index_entry
 from .ledger import WeaveLedger
-from .route import confirm_route
+from .route import confirm_route, normalize_target
 from .spool import spool_copy
 from .state import LoomState
 from .transcript import extract_text
@@ -180,10 +180,18 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
             if ledger.status_of(lid) in ("committed", "rejected", "quarantined"):
                 continue
             cached = ledger.entry(lid)
-            if cached.get("target"):              # routed in a prior run — reuse, no model call
-                route = {"target": cached["target"], "action": cached.get("action", "update")}
+            # Routed in a prior run — reuse without a model call, but re-validate
+            # first: entries planned before this guard existed (or poisoned by a
+            # bad run) must not bypass normalize_target on the reuse path.
+            cached_target = normalize_target(cached.get("target"), cfg.wiki_worktree)
+            if cached_target:
+                route = {"target": cached_target, "action": cached.get("action", "update")}
             else:
-                route = confirm_route(be, learning, index_listing)
+                if cached.get("target"):
+                    logging.warning("route: refused stale cached target %r for %s",
+                                    cached["target"], lid)
+                route = confirm_route(be, learning, index_listing,
+                                      wiki_root=cfg.wiki_worktree)
                 if not route:
                     ledger.defer(lid, "unroutable")
                     continue
