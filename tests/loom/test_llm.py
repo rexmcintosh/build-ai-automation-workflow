@@ -63,6 +63,27 @@ def test_headless_config_files_disable_everything():
     assert json.loads((base / "headless-mcp.json").read_text()) == {"mcpServers": {}}
 
 
+def test_claude_bin_prefers_path_lookup(monkeypatch):
+    monkeypatch.setattr(llm.shutil, "which", lambda name: "/somewhere/claude")
+    assert llm._claude_bin() == "/somewhere/claude"
+
+
+def test_claude_bin_falls_back_to_known_install_dirs(monkeypatch, tmp_path):
+    # Cron strips ~/.local/bin from PATH; the 2026-07-26..08-01 outage was this
+    # lookup failing and falling back to a nonexistent /usr/bin/claude.
+    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(llm, "_FALLBACK_BINS", (tmp_path / "missing", fake))
+    assert llm._claude_bin() == str(fake)
+
+
+def test_claude_bin_bare_name_when_nothing_found(monkeypatch, tmp_path):
+    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+    monkeypatch.setattr(llm, "_FALLBACK_BINS", (tmp_path / "missing",))
+    assert llm._claude_bin() == "claude"
+
+
 def test_run_raises_usage_limit_error_on_session_limit(monkeypatch):
     def fake_run(argv, **kwargs):
         return _Proc(1, stdout="You've hit your session limit · resets 5:10am (Europe/Lisbon)")
