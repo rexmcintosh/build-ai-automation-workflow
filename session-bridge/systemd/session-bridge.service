@@ -1,0 +1,11 @@
+[Unit]
+Description=session-bridge — per-tmux-session Telegram topics
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/bun run /home/dev/projects/build-ai-automation-workflow/session-bridge/src/main.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
