@@ -1,12 +1,35 @@
 // Claude Code Stop hook: if this tmux session's last input came from Telegram
 // (pending flag set by session-bridge), send the final assistant text to that
 // forum topic. Must always exit 0 and cost ~nothing when the flag is absent.
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs'
 import { loadConfig, loadToken } from '../src/config'
-import { pendingPath } from '../src/state'
+import { pendingPath, setPending } from '../src/state'
 import { Telegram } from '../src/telegram'
 
 const STALE_MS = 3_600_000
+
+// Transcripts grow without bound; a Stop hook must never slurp one. Read only the
+// final maxBytes and discard the leading partial line so every line still parses.
+export function readTail(path: string, maxBytes = 2 * 1024 * 1024): string {
+  const size = statSync(path).size
+  if (size <= maxBytes) return readFileSync(path, 'utf8')
+
+  // One extra byte, so we can tell a tail that begins exactly at a line break.
+  const length = maxBytes + 1
+  const start = size - length
+  const buf = Buffer.allocUnsafe(length)
+  const fd = openSync(path, 'r')
+  let read: number
+  try {
+    read = readSync(fd, buf, 0, length, start)
+  } finally {
+    closeSync(fd)
+  }
+  const text = buf.subarray(0, read).toString('utf8')
+  if (text.startsWith('\n')) return text.slice(1)
+  const nl = text.indexOf('\n')
+  return nl === -1 ? '' : text.slice(nl + 1)
+}
 
 export function lastAssistantText(jsonl: string): string | null {
   let out: string | null = null
@@ -45,7 +68,7 @@ if (import.meta.main) {
     }
 
     const input = JSON.parse(await Bun.stdin.text())
-    const text = lastAssistantText(readFileSync(input.transcript_path, 'utf8'))
+    const text = lastAssistantText(readTail(input.transcript_path))
     if (text === null) {
       unlinkSync(flagPath)
       process.exit(0)
@@ -53,7 +76,12 @@ if (import.meta.main) {
 
     const config = loadConfig()
     await new Telegram(loadToken()).send(config.groupId, flag.topicId, text)
-    unlinkSync(flagPath)
+    // A WORKING session owes two answers (its in-flight turn, then the queued
+    // message). Old flags predate the counter and mean one. Re-arm with a fresh
+    // timestamp so the second answer gets its own staleness window.
+    const remaining = (typeof flag.remaining === 'number' ? flag.remaining : 1) - 1
+    if (remaining > 0) setPending(session, flag.topicId, undefined, remaining)
+    else unlinkSync(flagPath)
   } catch (e) {
     // Leave the flag for a retry on the next Stop; never fail the session.
     console.error(`session-bridge hook: ${e}`)

@@ -11,10 +11,29 @@ export interface RouterDeps {
   inject(session: string, text: string): void
   pressKey(session: string, key: string): void
   reply(threadId: number | undefined, text: string): Promise<void>
-  setPending(session: string, topicId: number): void
+  setPending(session: string, topicId: number, dir?: string, remaining?: number): void
 }
 
 const APPROVAL_HINT = 'say approve, deny, or an option number (1-9)'
+const ARM_WINDOW_MS = 10 * 60 * 1000
+
+// A topic is "armed" once we have shown its pending prompt. Keys are only honored
+// while armed, so a message typed before seeing the prompt can never press a button.
+const armed = new Map<number, number>()
+
+export function resetArmedForTests(): void {
+  armed.clear()
+}
+
+function isArmed(threadId: number, now: number): boolean {
+  const at = armed.get(threadId)
+  if (at === undefined) return false
+  if (now - at > ARM_WINDOW_MS) {
+    armed.delete(threadId)
+    return false
+  }
+  return true
+}
 
 export async function handleUpdate(update: any, deps: RouterDeps): Promise<void> {
   const msg = update.message
@@ -45,12 +64,20 @@ export async function handleUpdate(update: any, deps: RouterDeps): Promise<void>
 
   if (state === 'BLOCKED') {
     const word = msg.text.trim().toLowerCase()
-    const key = word === 'approve' ? '1' : word === 'deny' ? 'Escape' : /^[1-9]$/.test(word) ? word : null
+    const wanted =
+      word === 'approve' ? '1' : word === 'deny' ? 'Escape' : /^[1-9]$/.test(word) ? word : null
+    // Unarmed topics always get the prompt first, even for "approve" — you never
+    // approve something you have not been shown.
+    const key = wanted !== null && isArmed(threadId, Date.now()) ? wanted : null
     if (key === null) {
       const pane = deps.capture(session) ?? ''
+      armed.set(threadId, Date.now())
       await deps.reply(threadId, `🔴 ${session} is waiting on an approval:\n\n${tailLines(pane, 15)}\n\n${APPROVAL_HINT}`)
       return
     }
+    armed.delete(threadId)
+    // Flag first: the answer that follows the approval belongs in this tab.
+    deps.setPending(session, threadId, undefined, 1)
     deps.pressKey(session, key)
     await Bun.sleep(500)
     const after = deps.capture(session) ?? ''
@@ -59,8 +86,20 @@ export async function handleUpdate(update: any, deps: RouterDeps): Promise<void>
   }
 
   // WORKING / WAITING / IDLE: deliver the text.
-  deps.inject(session, msg.text)
-  deps.setPending(session, threadId)
+  // Strip ESC so pasted content cannot terminate bracketed paste early.
+  const text = msg.text.replace(/\x1b/g, '')
+  try {
+    deps.inject(session, text)
+  } catch (e) {
+    console.error(`session-bridge: inject failed for ${session}: ${e}`)
+    await deps.reply(
+      threadId,
+      `⚠ delivery failed — could not type into ${session}; check journalctl --user -u session-bridge`,
+    )
+    return
+  }
+  // A WORKING session owes two answers: its in-flight turn, then yours.
+  deps.setPending(session, threadId, undefined, state === 'WORKING' ? 2 : 1)
   if (state === 'WORKING') {
     await deps.reply(
       threadId,
