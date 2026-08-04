@@ -24,9 +24,20 @@ export function classify(pane: string | null): SessionState {
   return 'IDLE'
 }
 
-function run(cmd: string[]): { code: number; out: string } {
+function run(cmd: string[]): { code: number; out: string; err: string } {
   const r = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'pipe' })
-  return { code: r.exitCode, out: r.stdout.toString() }
+  return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() }
+}
+
+// tmux -t targets are prefix matches by default; '=' forces an exact-name match so
+// 'loom-1' can never resolve to 'loom-14'.
+function target(session: string): string {
+  return `=${session}`
+}
+
+function detail(err: string): string {
+  const first = err.trim().slice(0, 200)
+  return first === '' ? '' : `: ${first}`
 }
 
 export function listSessions(): string[] {
@@ -36,7 +47,7 @@ export function listSessions(): string[] {
 }
 
 export function capturePane(session: string): string | null {
-  const r = run(['tmux', 'capture-pane', '-t', session, '-p'])
+  const r = run(['tmux', 'capture-pane', '-t', target(session), '-p'])
   return r.code === 0 ? r.out : null
 }
 
@@ -45,15 +56,15 @@ export function inject(session: string, text: string): void {
   const buf = `sb-${session.replace(/[^a-zA-Z0-9]/g, '_')}`
   for (const step of [
     ['tmux', 'set-buffer', '-b', buf, '--', text],
-    ['tmux', 'paste-buffer', '-p', '-d', '-b', buf, '-t', session],
-    ['tmux', 'send-keys', '-t', session, 'Enter'],
+    ['tmux', 'paste-buffer', '-p', '-d', '-b', buf, '-t', target(session)],
+    ['tmux', 'send-keys', '-t', target(session), 'Enter'],
   ]) {
     const r = run(step)
-    if (r.code !== 0) throw new Error(`tmux ${step[1]} failed for ${session}`)
+    if (r.code !== 0) throw new Error(`tmux ${step[1]} failed for ${session}${detail(r.err)}`)
   }
 }
 
 export function pressKey(session: string, key: string): void {
-  const r = run(['tmux', 'send-keys', '-t', session, key])
-  if (r.code !== 0) throw new Error(`tmux send-keys failed for ${session}`)
+  const r = run(['tmux', 'send-keys', '-t', target(session), key])
+  if (r.code !== 0) throw new Error(`tmux send-keys failed for ${session}${detail(r.err)}`)
 }

@@ -3,12 +3,24 @@ import { chunkText } from './chunk'
 export class Telegram {
   constructor(private token: string) {}
 
-  async call(method: string, params: Record<string, unknown> = {}): Promise<any> {
-    const res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(params),
-    })
+  async call(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = 30_000,
+  ): Promise<any> {
+    let res: Response
+    try {
+      res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch {
+      // Bun's fetch errors carry a `path` property holding the full URL — which
+      // contains the token. Never let the original error escape.
+      throw new Error(`telegram ${method}: network failure`)
+    }
     const body: any = await res.json()
     if (!body.ok) {
       // Never include the URL (contains the token) in errors.
@@ -18,7 +30,12 @@ export class Telegram {
   }
 
   async getUpdates(offset: number, timeoutSec: number): Promise<any[]> {
-    return this.call('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] })
+    // Long poll: allow the server's full hold time plus slack before aborting.
+    return this.call(
+      'getUpdates',
+      { offset, timeout: timeoutSec, allowed_updates: ['message'] },
+      (timeoutSec + 15) * 1000,
+    )
   }
 
   async send(chatId: number, threadId: number | undefined, text: string): Promise<void> {

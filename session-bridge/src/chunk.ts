@@ -1,3 +1,11 @@
+// Back off one unit when the cut would land between a surrogate pair, which would
+// otherwise emit two lone halves and render as replacement characters.
+function safeCut(s: string, limit: number): number {
+  const code = s.charCodeAt(limit - 1)
+  const splitsPair = code >= 0xd800 && code <= 0xdbff
+  return splitsPair && limit > 1 ? limit - 1 : limit
+}
+
 export function chunkText(text: string, limit = 4096): string[] {
   if (text.length === 0) return []
   if (text.length <= limit) return [text]
@@ -12,8 +20,9 @@ export function chunkText(text: string, limit = 4096): string[] {
     if (current !== '') chunks.push(current)
     let rest = para
     while (rest.length > limit) {
-      chunks.push(rest.slice(0, limit))
-      rest = rest.slice(limit)
+      const cut = safeCut(rest, limit)
+      chunks.push(rest.slice(0, cut))
+      rest = rest.slice(cut)
     }
     current = rest
   }
