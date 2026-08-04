@@ -1,12 +1,19 @@
 // Claude Code Stop hook: if this tmux session's last input came from Telegram
 // (pending flag set by session-bridge), send the final assistant text to that
 // forum topic. Must always exit 0 and cost ~nothing when the flag is absent.
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs'
-import { loadConfig, loadToken } from '../src/config'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs'
+import { STATE_DIR, loadConfig, loadToken } from '../src/config'
 import { pendingPath, setPending } from '../src/state'
 import { Telegram } from '../src/telegram'
 
 const STALE_MS = 3_600_000
+
+function hlog(line: string): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true })
+    appendFileSync(`${STATE_DIR}/hook.log`, `${new Date().toISOString()} ${line}\n`)
+  } catch {}
+}
 
 // Transcripts grow without bound; a Stop hook must never slurp one. Read only the
 // final maxBytes and discard the leading partial line so every line still parses.
@@ -75,7 +82,9 @@ if (import.meta.main) {
     }
 
     const config = loadConfig()
+    hlog(`${session} → topic ${flag.topicId} remaining=${flag.remaining ?? 1} text="${text.slice(0, 60).replace(/\n/g, ' ')}"`)
     await new Telegram(loadToken()).send(config.groupId, flag.topicId, text)
+    hlog(`${session} sent ok`)
     // A WORKING session owes two answers (its in-flight turn, then the queued
     // message). Old flags predate the counter and mean one. Re-arm with a fresh
     // timestamp so the second answer gets its own staleness window.
@@ -84,6 +93,7 @@ if (import.meta.main) {
     else unlinkSync(flagPath)
   } catch (e) {
     // Leave the flag for a retry on the next Stop; never fail the session.
+    hlog(`error: ${e}`)
     console.error(`session-bridge hook: ${e}`)
   }
   process.exit(0)
