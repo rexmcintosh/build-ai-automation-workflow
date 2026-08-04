@@ -72,18 +72,24 @@ Inbound behavior by state:
 | --- | --- |
 | WAITING / IDLE | Inject the text (below), reply "→ delivered". Set the reply flag. |
 | WORKING | Inject (Claude Code queues typed input mid-turn), reply "session is working — queued; the next answer may belong to its current task". Set the reply flag. |
-| BLOCKED | Do **not** inject. Send the pane's prompt excerpt (last ~15 lines) and enter approval mode for this topic. |
+| BLOCKED | Do **not** inject. Send the pane's prompt excerpt (last ~15 lines), which *arms* this topic for 10 minutes. |
 | GONE | Reply "session ended", close the topic. |
 
 Approval mode (per topic, while the session stays BLOCKED):
 
-- `approve` → `tmux send-keys '1'` (selects the modal's "Yes").
-- `deny` → `tmux send-keys Escape` (cancels, returns control to Claude).
-- A bare number `1`–`9` → presses that option (covers multi-option modals like
-  AskUserQuestion).
+- The **first** message to a blocked session always returns the prompt excerpt and arms
+  the topic for 10 minutes — never a keypress. You never approve something you have not
+  been shown, so an `approve` typed blind is answered with the prompt instead.
+- While armed: `approve` → `tmux send-keys '1'` (selects the modal's "Yes"); `deny` →
+  `tmux send-keys Escape` (cancels); a bare number `1`–`9` → presses that option (covers
+  multi-option modals like AskUserQuestion).
+- Any keypress disarms the topic, so a second key needs a fresh excerpt first. A
+  keypress also sets the reply flag, so the answer produced after the approval is
+  forwarded back to the tab.
 - Anything else → re-send the prompt excerpt with "say approve, deny, or an option
-  number". After any keypress, capture the pane again and confirm the new state in the
-  tab. If the session is no longer BLOCKED on re-check, fall through to normal handling.
+  number" (and re-arm). After any keypress, capture the pane again and confirm the new
+  state in the tab. If the session is no longer BLOCKED on re-check, fall through to
+  normal handling.
 
 Text injection mechanics:
 
@@ -92,7 +98,12 @@ Text injection mechanics:
 - Text is passed literally — never through a shell, no interpolation.
 
 Reply flag: `~/.local/state/session-bridge/pending/<session>` containing
-`{topic_id, ts}`. Written on every successful injection; consumed by the Stop hook.
+`{topicId, ts, remaining}`. Written on every successful injection and on every approval
+keypress; consumed by the Stop hook. `remaining` is how many Stop events should still
+forward an answer to this topic — 2 for an injection into a WORKING session, 1
+otherwise. The hook decrements it and rewrites the flag (with a fresh `ts`) while it
+stays above zero, deleting the flag only on the last one. A flag with no `remaining`
+field predates the counter and counts as 1.
 
 ### 4. Reply hook (Stop hook, global)
 
@@ -115,7 +126,7 @@ Registered in `~/.claude/settings.json` → `hooks.Stop`. A small script that:
 | `~/.config/session-bridge/.env` | `TELEGRAM_BOT_TOKEN` (600) — DONE at design time |
 | `~/.config/session-bridge/config.json` | `groupId`, `allowedUserId` (7735693897), `excludePatterns`, poll/sync intervals |
 | `~/.local/state/session-bridge/state.json` | update offset, `session ↔ topic_id` map, topic status |
-| `~/.local/state/session-bridge/pending/<session>` | reply flag: `{topic_id, ts}` |
+| `~/.local/state/session-bridge/pending/<session>` | reply flag: `{topicId, ts, remaining}` |
 | `~/.config/systemd/user/session-bridge.service` | unit file |
 
 ## Security model
@@ -137,7 +148,10 @@ Registered in `~/.claude/settings.json` → `hooks.Stop`. A small script that:
   unaffected; `agents` nudges unaffected.
 - **Queued-message quirk (known, accepted):** messaging a WORKING session means the
   next Stop may answer its in-flight task, not you; your answer follows on the Stop
-  after. The bridge warns in-tab whenever it queues.
+  after. The flag therefore carries `remaining: 2` for WORKING injections, so **both**
+  the in-flight answer and the answer to your message are forwarded to the tab. The
+  bridge still warns in-tab whenever it queues, because the first reply may look like a
+  non-sequitur.
 - **Modal drift:** if Claude Code's modal strings change, BLOCKED detection degrades to
   WAITING/IDLE and the bridge would paste text at a frozen prompt (expected to be
   benign, but verified during live smoke testing). Heuristics live in one function

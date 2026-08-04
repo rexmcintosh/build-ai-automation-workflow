@@ -9,10 +9,9 @@ export interface SyncAction {
 export function planSync(
   live: string[],
   topics: Record<string, TopicInfo>,
-  excludePatterns: string[],
+  excludeRegexps: RegExp[],
 ): SyncAction[] {
-  const excludes = excludePatterns.map(p => new RegExp(p))
-  const watched = live.filter(s => !excludes.some(r => r.test(s)))
+  const watched = live.filter(s => !excludeRegexps.some(r => r.test(s)))
   const actions: SyncAction[] = []
   for (const session of watched) {
     const t = topics[session]
@@ -24,4 +23,24 @@ export function planSync(
     }
   }
   return actions
+}
+
+// A single failed `tmux ls` returns an empty session list, which would otherwise
+// archive every tab at once. Require a session to be missing on two consecutive syncs
+// before its topic is closed. `nextMissing` is the set to carry into the next sync.
+export function debounceCloses(
+  actions: SyncAction[],
+  prevMissing: Set<string>,
+): { execute: SyncAction[]; nextMissing: Set<string> } {
+  const missingNow = new Set<string>()
+  const execute: SyncAction[] = []
+  for (const a of actions) {
+    if (a.kind !== 'close') {
+      execute.push(a)
+      continue
+    }
+    missingNow.add(a.session)
+    if (prevMissing.has(a.session)) execute.push(a)
+  }
+  return { execute, nextMissing: missingNow }
 }
