@@ -71,3 +71,24 @@ test('readTail yields nothing usable when the tail has no line break', () => {
   expect(readTail(p, 200)).toBe('')
   expect(lastAssistantText(readTail(p, 200))).toBeNull()
 })
+
+test('lastAssistantEntry carries the entry timestamp', () => {
+  const { lastAssistantEntry } = require('../hook/stop-hook')
+  const jsonl = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-08-04T23:37:37.374Z',
+    message: { content: [{ type: 'text', text: 'watermelon' }] },
+  })
+  const e = lastAssistantEntry(jsonl)
+  expect(e.text).toBe('watermelon')
+  expect(e.ts).toBe(Date.parse('2026-08-04T23:37:37.374Z'))
+})
+
+test('missing timestamp counts as fresh (Infinity)', () => {
+  const { lastAssistantEntry } = require('../hook/stop-hook')
+  const jsonl = JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'ok' }] },
+  })
+  expect(lastAssistantEntry(jsonl).ts).toBe(Infinity)
+})

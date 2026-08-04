@@ -38,8 +38,15 @@ export function readTail(path: string, maxBytes = 2 * 1024 * 1024): string {
   return nl === -1 ? '' : text.slice(nl + 1)
 }
 
-export function lastAssistantText(jsonl: string): string | null {
-  let out: string | null = null
+export interface AssistantEntry {
+  text: string
+  // Entry timestamp in epoch ms; entries without a parseable timestamp get
+  // Infinity so they always count as fresh (never silently dropped).
+  ts: number
+}
+
+export function lastAssistantEntry(jsonl: string): AssistantEntry | null {
+  let out: AssistantEntry | null = null
   for (const line of jsonl.split('\n')) {
     if (line.trim() === '') continue
     let entry: any
@@ -54,9 +61,15 @@ export function lastAssistantText(jsonl: string): string | null {
     const texts = blocks
       .filter((b: any) => b.type === 'text' && typeof b.text === 'string')
       .map((b: any) => b.text)
-    if (texts.length > 0) out = texts.join('\n\n')
+    if (texts.length === 0) continue
+    const parsed = Date.parse(entry.timestamp)
+    out = { text: texts.join('\n\n'), ts: Number.isNaN(parsed) ? Infinity : parsed }
   }
   return out
+}
+
+export function lastAssistantText(jsonl: string): string | null {
+  return lastAssistantEntry(jsonl)?.text ?? null
 }
 
 if (import.meta.main) {
@@ -75,20 +88,38 @@ if (import.meta.main) {
     }
 
     const input = JSON.parse(await Bun.stdin.text())
-    const text = lastAssistantText(readTail(input.transcript_path))
-    if (text === null) {
-      unlinkSync(flagPath)
-      process.exit(0)
+
+    // Claude Code flushes the final answer to the transcript a beat AFTER the
+    // Stop event fires. Never forward text generated before the question was
+    // injected (flag.ts): poll until a fresh entry appears or the budget runs
+    // out. FRESH_SLACK_MS absorbs daemon/session clock skew within one host.
+    const remainingBefore = typeof flag.remaining === 'number' ? flag.remaining : 1
+    const FRESH_SLACK_MS = 2_000
+    const deadline = Date.now() + 4_000
+    let entry = lastAssistantEntry(readTail(input.transcript_path))
+    const fresh = () => entry !== null && entry.ts >= flag.ts - FRESH_SLACK_MS
+    while (!fresh() && Date.now() < deadline) {
+      await Bun.sleep(500)
+      entry = lastAssistantEntry(readTail(input.transcript_path))
     }
+    if (!fresh()) {
+      // A WORKING-session flag (remaining >= 2) legitimately forwards the
+      // in-flight answer, which predates the question — allow that one.
+      if (!(remainingBefore >= 2 && entry !== null)) {
+        hlog(`${session} no fresh answer (flag ts ${flag.ts}, entry ts ${entry?.ts ?? 'none'}) — leaving flag for next Stop`)
+        process.exit(0)
+      }
+    }
+    const text = entry!.text
 
     const config = loadConfig()
-    hlog(`${session} → topic ${flag.topicId} remaining=${flag.remaining ?? 1} text="${text.slice(0, 60).replace(/\n/g, ' ')}"`)
+    hlog(`${session} → topic ${flag.topicId} remaining=${remainingBefore} text="${text.slice(0, 60).replace(/\n/g, ' ')}"`)
     await new Telegram(loadToken()).send(config.groupId, flag.topicId, text)
     hlog(`${session} sent ok`)
     // A WORKING session owes two answers (its in-flight turn, then the queued
     // message). Old flags predate the counter and mean one. Re-arm with a fresh
     // timestamp so the second answer gets its own staleness window.
-    const remaining = (typeof flag.remaining === 'number' ? flag.remaining : 1) - 1
+    const remaining = remainingBefore - 1
     if (remaining > 0) setPending(session, flag.topicId, undefined, remaining)
     else unlinkSync(flagPath)
   } catch (e) {
