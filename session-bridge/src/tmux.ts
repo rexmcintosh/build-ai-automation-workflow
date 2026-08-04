@@ -1,0 +1,59 @@
+export type SessionState = 'BLOCKED' | 'WORKING' | 'WAITING' | 'IDLE' | 'GONE'
+
+// Ported from ~/.local/bin/agents classify() — keep the two in sync.
+const BLOCKED_RE = /Esc to cancel|Do you want to (proceed|create|make|run|apply)/
+const WORKING_RE = /esc to interrupt/
+const WAITING_RE =
+  /^[^A-Za-z]*[A-Z][a-z]+ for \d+m \d+s$|^[^A-Za-z]*[A-Z][a-z]+ for \d+s$|How is Claude doing this session|new task\? \/clear|say "do it"/m
+
+export function tailLines(pane: string, n = 15): string {
+  return pane
+    .split('\n')
+    .map(l => l.replace(/\s+$/, ''))
+    .filter(l => l !== '')
+    .slice(-n)
+    .join('\n')
+}
+
+export function classify(pane: string | null): SessionState {
+  if (pane === null) return 'GONE'
+  const tail = tailLines(pane, 15)
+  if (BLOCKED_RE.test(tail)) return 'BLOCKED'
+  if (WORKING_RE.test(tail)) return 'WORKING'
+  if (WAITING_RE.test(tail)) return 'WAITING'
+  return 'IDLE'
+}
+
+function run(cmd: string[]): { code: number; out: string } {
+  const r = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'pipe' })
+  return { code: r.exitCode, out: r.stdout.toString() }
+}
+
+export function listSessions(): string[] {
+  const r = run(['tmux', 'ls', '-F', '#{session_name}'])
+  if (r.code !== 0) return []
+  return r.out.split('\n').filter(s => s !== '')
+}
+
+export function capturePane(session: string): string | null {
+  const r = run(['tmux', 'capture-pane', '-t', session, '-p'])
+  return r.code === 0 ? r.out : null
+}
+
+// Bracketed paste so multi-line text doesn't submit early; Enter submits once.
+export function inject(session: string, text: string): void {
+  const buf = `sb-${session.replace(/[^a-zA-Z0-9]/g, '_')}`
+  for (const step of [
+    ['tmux', 'set-buffer', '-b', buf, '--', text],
+    ['tmux', 'paste-buffer', '-p', '-d', '-b', buf, '-t', session],
+    ['tmux', 'send-keys', '-t', session, 'Enter'],
+  ]) {
+    const r = run(step)
+    if (r.code !== 0) throw new Error(`tmux ${step[1]} failed for ${session}`)
+  }
+}
+
+export function pressKey(session: string, key: string): void {
+  const r = run(['tmux', 'send-keys', '-t', session, key])
+  if (r.code !== 0) throw new Error(`tmux send-keys failed for ${session}`)
+}
