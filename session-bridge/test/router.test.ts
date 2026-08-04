@@ -96,7 +96,9 @@ test('unknown topic id → no live session reply', async () => {
 test('WAITING → inject, flag with remaining 1, delivered', async () => {
   const { deps, calls } = makeDeps('WAITING')
   await handleUpdate(msg('run the tests'), deps)
-  expect(calls.injected).toEqual(['run the tests'])
+  expect(calls.injected.length).toBe(1)
+  expect(calls.injected[0]).toStartWith('[message from Rex via')
+  expect(calls.injected[0]).toEndWith('\n' + 'run the tests')
   expect(calls.pending).toEqual([7])
   expect(calls.pendingRemaining).toEqual([1])
   expect(calls.replies).toEqual(['→ delivered'])
@@ -105,7 +107,9 @@ test('WAITING → inject, flag with remaining 1, delivered', async () => {
 test('WORKING → inject, flag with remaining 2, queued warning', async () => {
   const { deps, calls } = makeDeps('WORKING')
   await handleUpdate(msg('also check lint'), deps)
-  expect(calls.injected).toEqual(['also check lint'])
+  expect(calls.injected.length).toBe(1)
+  expect(calls.injected[0]).toStartWith('[message from Rex via')
+  expect(calls.injected[0]).toEndWith('\n' + 'also check lint')
   expect(calls.pending).toEqual([7])
   expect(calls.pendingRemaining).toEqual([2])
   expect(calls.replies[0]).toStartWith('⏳ session is working — queued')
@@ -114,7 +118,7 @@ test('WORKING → inject, flag with remaining 2, queued warning', async () => {
 test('ESC characters are stripped before injection', async () => {
   const { deps, calls } = makeDeps('WAITING')
   await handleUpdate(msg('hi\x1b[201~ rm -rf /\x1b'), deps)
-  expect(calls.injected).toEqual(['hi[201~ rm -rf /'])
+  expect(calls.injected[0]).toEndWith('hi[201~ rm -rf /')
   expect(calls.injected[0]).not.toContain('\x1b')
 })
 

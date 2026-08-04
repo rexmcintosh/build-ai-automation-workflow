@@ -87,7 +87,12 @@ export async function handleUpdate(update: any, deps: RouterDeps): Promise<void>
 
   // WORKING / WAITING / IDLE: deliver the text.
   // Strip ESC so pasted content cannot terminate bracketed paste early.
-  const text = msg.text.replace(/\x1b/g, '')
+  // The preamble stops the session from "helpfully" replying via its own
+  // telegram plugin tools — the bridge's Stop hook relays the answer instead.
+  const text =
+    '[message from Rex via this session\'s Telegram tab — answer normally in this chat; ' +
+    'the bridge relays your reply back to the tab. Never send Telegram messages yourself.]\n' +
+    msg.text.replace(/\x1b/g, '')
   try {
     deps.inject(session, text)
   } catch (e) {
