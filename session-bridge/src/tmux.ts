@@ -30,9 +30,11 @@ function run(cmd: string[]): { code: number; out: string; err: string } {
 }
 
 // tmux -t targets are prefix matches by default; '=' forces an exact-name match so
-// 'loom-1' can never resolve to 'loom-14'.
+// 'loom-1' can never resolve to 'loom-14'. Pane-taking commands (capture-pane,
+// paste-buffer, send-keys) only honor '=' in the session part of a target-pane,
+// so the trailing ':' is required — bare '=name' fails with "can't find pane".
 function target(session: string): string {
-  return `=${session}`
+  return `=${session}:`
 }
 
 function detail(err: string): string {
