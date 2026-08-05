@@ -71,10 +71,12 @@ PROMPT="${PROMPT//\{\{REPORT\}\}/$REPORT}"
 PROMPT="${PROMPT//\{\{BASE\}\}/$BASE}"
 PROMPT="${PROMPT//\{\{CHAT_ID\}\}/$CHAT_ID}"
 
-# Read-only by construction: Read (logs) + Telegram send. No Bash/Write/Edit.
+# Read-only by construction: Read (logs) only. No Bash/Write/Edit, no send tools —
+# the investigator COMPOSES the alert; delivery happens below via raw Bot API
+# (bin/tg-send), so the telegram plugin/MCP is not needed.
 RESULT=$("$CLAUDE_BIN" -p "$PROMPT" \
   --model "$MODEL" \
-  --allowedTools Read mcp__plugin_telegram_telegram__reply \
+  --allowedTools Read \
   --dangerously-skip-permissions \
   --output-format json 2>>"$LOG.err" \
   | python3 -c "import json,sys
@@ -82,10 +84,17 @@ try: print(json.load(sys.stdin).get('result','').strip())
 except Exception as e: print('PARSE_ERROR:'+str(e))" 2>/dev/null)
 RC=$?
 
-echo "[$TS] rc=$RC escalate=1 result=\"${RESULT:0:80}\"" >> "$LOG"
-if [ $RC -eq 0 ] && printf '%s' "$RESULT" | grep -q "SENT"; then
-  echo "escalated + notified."
-  exit 0
+TG_SEND="$BASE/bin/tg-send"
+if [ $RC -eq 0 ] && [ -n "$RESULT" ] && ! printf '%s' "$RESULT" | grep -q '^FAILED'; then
+  if printf '%s' "$RESULT" | "$TG_SEND" "$CHAT_ID" -; then
+    echo "[$TS] rc=0 escalate=1 result=\"SENT ${RESULT:0:70}\"" >> "$LOG"
+    echo "escalated + notified."
+    exit 0
+  fi
+  RESULT="tg-send failed: ${RESULT:0:60}"
+  RC=1
 fi
+[ $RC -eq 0 ] && RC=1
+echo "[$TS] rc=$RC escalate=1 result=\"${RESULT:0:80}\"" >> "$LOG"
 echo "FAILED to deliver watchdog alert (rc=$RC): $RESULT" >&2
 exit 1

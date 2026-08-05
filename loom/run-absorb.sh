@@ -109,10 +109,8 @@ print(scrub(msg))
 PY
 )"
   [ -z "$MSG" ] && MSG="⚠️ Loom failed (absorb rc=$RC, promote rc=$PRC, failed=${SILENT_FAIL:-?}). Check loom/logs/."
-  PROMPT="Send a Telegram message to chat_id ${CHAT_ID} with text: ${MSG} Output only SENT or FAILED."
-  claude -p "$PROMPT" \
-    --model haiku --allowedTools mcp__plugin_telegram_telegram__reply \
-    --dangerously-skip-permissions --output-format text >/dev/null 2>&1 || true
+  # Raw Bot API send (bin/tg-send) — no claude call, no telegram plugin/MCP needed.
+  "$RUNTIME/bin/tg-send" "$CHAT_ID" "$MSG" >/dev/null 2>&1 || true
 fi
 
 exit $RC

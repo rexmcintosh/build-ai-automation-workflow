@@ -66,8 +66,13 @@ ALLOWED=(
   mcp__claude_ai_Gmail__get_thread
   mcp__claude_ai_Google_Calendar__list_events
   mcp__claude_ai_Google_Calendar__list_calendars
-  mcp__plugin_telegram_telegram__reply
 )
+
+# The agent COMPOSES only; the send happens here via raw Bot API. This removes
+# the telegram plugin/MCP dependency entirely (plugin can be disabled globally)
+# and with it the historical failure modes: MCP still "connecting" at run time,
+# MarkdownV2 escaping rejects, and the placeholder-send incident.
+TG_SEND="$DIR/../bin/tg-send"
 
 TS="$(date -Iseconds)"
 # NOTE: headless MCP tool calls require --dangerously-skip-permissions; --allowedTools
@@ -89,15 +94,29 @@ try:
  print('cost_usd=%s in=%s out=%s'%(d.get('total_cost_usd','?'),u.get('input_tokens','?'),u.get('output_tokens','?')))
 except: print('usage=?')" 2>/dev/null)
 
-echo "[$TS] mode=$MODE rc=$RC result=\"${RESULT:0:90}\" $USAGE" >> "$LOG"
+# --- send: agent output IS the briefing text (or FAILED:<reason>) ---
+# Success contract for the log stays `rc=0 ... result="SENT..."` — the watchdog's
+# check_bebop_runs parses `[ts] ... rc=N` from these lines; keep that shape.
+SEND_OK=0
+if [ $RC -eq 0 ] && [ -n "$RESULT" ] && ! printf '%s' "$RESULT" | grep -q '^FAILED'; then
+  if printf '%s' "$RESULT" | "$TG_SEND" "$CHAT_ID" -; then
+    SEND_OK=1
+  else
+    RC=1
+    RESULT="FAILED:tg-send (Bot API) send failed"
+  fi
+else
+  [ $RC -eq 0 ] && RC=1
+fi
 
-if [ $RC -eq 0 ] && printf '%s' "$RESULT" | grep -q "SENT"; then
+if [ $SEND_OK -eq 1 ]; then
+  echo "[$TS] mode=$MODE rc=0 result=\"SENT ${RESULT:0:80}\" $USAGE" >> "$LOG"
   python3 -c "import json;open('$STATE_FILE','w').write(json.dumps({'last_run_epoch':$NOW_EPOCH,'last_run_iso':'$TS','last_mode':'$MODE'},indent=2)+'\n')"
-  echo "ok: $RESULT"
+  echo "ok: sent"
   exit 0
 else
-  "$CLAUDE_BIN" -p "Send a Telegram message to chat_id $CHAT_ID with text: '⚠️ Bebop $MODE briefing failed (rc=$RC). Check ~/projects/build-ai-automation-workflow/bebop/logs/.' Output only SENT or FAILED." \
-    --model "$MODEL" --allowedTools mcp__plugin_telegram_telegram__reply --dangerously-skip-permissions --output-format text >/dev/null 2>&1 || true
+  echo "[$TS] mode=$MODE rc=$RC result=\"${RESULT:0:90}\" $USAGE" >> "$LOG"
+  "$TG_SEND" "$CHAT_ID" "⚠️ Bebop $MODE briefing failed (rc=$RC). Check ~/projects/build-ai-automation-workflow/bebop/logs/." || true
   echo "FAILED rc=$RC result=$RESULT" >&2
   exit 1
 fi
