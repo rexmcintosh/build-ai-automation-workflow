@@ -15,6 +15,18 @@ export interface RouterDeps {
 }
 
 const APPROVAL_HINT = 'say approve, deny, or an option number (1-9)'
+
+// One message format for "this session is blocked", shared by the router's
+// reactive path and main's proactive blocked-watcher.
+export function blockedPrompt(session: string, pane: string): string {
+  return `🔴 ${session} is waiting on an approval:\n\n${tailLines(pane, 15)}\n\n${APPROVAL_HINT}`
+}
+
+// Main's blocked-watcher arms a topic when it proactively posts the prompt,
+// so the user's next reply can press a key without another round trip.
+export function armTopic(threadId: number): void {
+  armed.set(threadId, Date.now())
+}
 const ARM_WINDOW_MS = 10 * 60 * 1000
 
 // A topic is "armed" once we have shown its pending prompt. Keys are only honored
@@ -72,7 +84,7 @@ export async function handleUpdate(update: any, deps: RouterDeps): Promise<void>
     if (key === null) {
       const pane = deps.capture(session) ?? ''
       armed.set(threadId, Date.now())
-      await deps.reply(threadId, `🔴 ${session} is waiting on an approval:\n\n${tailLines(pane, 15)}\n\n${APPROVAL_HINT}`)
+      await deps.reply(threadId, blockedPrompt(session, pane))
       return
     }
     armed.delete(threadId)
