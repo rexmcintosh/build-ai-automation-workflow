@@ -109,13 +109,17 @@ else
   [ $RC -eq 0 ] && RC=1
 fi
 
+# runs.log entries must stay ONE line ([ts] ... rc=N — parsed by the watchdog),
+# and RESULT is now multiline briefing text, so flatten before logging.
+RESULT_1LINE="$(printf '%s' "$RESULT" | tr '\n' ' ')"
+
 if [ $SEND_OK -eq 1 ]; then
-  echo "[$TS] mode=$MODE rc=0 result=\"SENT ${RESULT:0:80}\" $USAGE" >> "$LOG"
+  echo "[$TS] mode=$MODE rc=0 result=\"SENT ${RESULT_1LINE:0:80}\" $USAGE" >> "$LOG"
   python3 -c "import json;open('$STATE_FILE','w').write(json.dumps({'last_run_epoch':$NOW_EPOCH,'last_run_iso':'$TS','last_mode':'$MODE'},indent=2)+'\n')"
   echo "ok: sent"
   exit 0
 else
-  echo "[$TS] mode=$MODE rc=$RC result=\"${RESULT:0:90}\" $USAGE" >> "$LOG"
+  echo "[$TS] mode=$MODE rc=$RC result=\"${RESULT_1LINE:0:90}\" $USAGE" >> "$LOG"
   "$TG_SEND" "$CHAT_ID" "⚠️ Bebop $MODE briefing failed (rc=$RC). Check ~/projects/build-ai-automation-workflow/bebop/logs/." || true
   echo "FAILED rc=$RC result=$RESULT" >&2
   exit 1

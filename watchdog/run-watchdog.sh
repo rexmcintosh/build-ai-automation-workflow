@@ -85,16 +85,18 @@ except Exception as e: print('PARSE_ERROR:'+str(e))" 2>/dev/null)
 RC=$?
 
 TG_SEND="$BASE/bin/tg-send"
+# runs.log entries must stay ONE line; RESULT is multiline alert text — flatten.
+RESULT_1LINE="$(printf '%s' "$RESULT" | tr '\n' ' ')"
 if [ $RC -eq 0 ] && [ -n "$RESULT" ] && ! printf '%s' "$RESULT" | grep -q '^FAILED'; then
   if printf '%s' "$RESULT" | "$TG_SEND" "$CHAT_ID" -; then
-    echo "[$TS] rc=0 escalate=1 result=\"SENT ${RESULT:0:70}\"" >> "$LOG"
+    echo "[$TS] rc=0 escalate=1 result=\"SENT ${RESULT_1LINE:0:70}\"" >> "$LOG"
     echo "escalated + notified."
     exit 0
   fi
-  RESULT="tg-send failed: ${RESULT:0:60}"
+  RESULT_1LINE="tg-send failed: ${RESULT_1LINE:0:60}"
   RC=1
 fi
 [ $RC -eq 0 ] && RC=1
-echo "[$TS] rc=$RC escalate=1 result=\"${RESULT:0:80}\"" >> "$LOG"
+echo "[$TS] rc=$RC escalate=1 result=\"${RESULT_1LINE:0:80}\"" >> "$LOG"
 echo "FAILED to deliver watchdog alert (rc=$RC): $RESULT" >&2
 exit 1
