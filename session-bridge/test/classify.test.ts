@@ -58,3 +58,8 @@ test('tailLines keeps last N non-empty right-trimmed lines', () => {
   const pane = 'a  \n\n\nb\nc\n'
   expect(tailLines(pane, 2)).toBe('b\nc')
 })
+
+test('AskUserQuestion menu footer → BLOCKED', () => {
+  const pane = 'Which color do you pick?\n❯ 1. Red\n  2. Blue\nEnter to select · ↑/↓ to navigate · Esc to cancel'
+  expect(classify(pane)).toBe('BLOCKED')
+})
