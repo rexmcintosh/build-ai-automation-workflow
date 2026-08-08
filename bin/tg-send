@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# tg-send — send a Telegram message via the raw Bot API (no plugin, no MCP, no model).
+#
+# Replaces mcp__plugin_telegram_telegram__reply for all cron consumers (bebop,
+# watchdog, loom, security-sweep) so the telegram channel plugin can be disabled
+# without breaking outbound alerts. Same pattern as `agents` tg_send.
+#
+# Usage:  tg-send <chat_id> [text]     text from stdin when omitted or "-"
+# Token:  TELEGRAM_BOT_TOKEN — real env wins, else ~/.claude/channels/telegram/.env
+# Output: nothing on success. Exit 0 iff every chunk got HTTP 200.
+#
+# Sends PLAIN TEXT (no parse_mode) deliberately: MarkdownV2 escaping was a
+# recurring send-failure cause under the plugin. Chunks at 4000 chars on line
+# boundaries (Telegram hard cap is 4096). One retry per chunk after 2 s.
+set -u
+
+CHAT_ID="${1:?usage: tg-send <chat_id> [text|-]}"
+shift || true
+if [ $# -gt 0 ] && [ "${1}" != "-" ]; then TEXT="$1"; else TEXT="$(cat)"; fi
+
+TG_ENV="${TG_ENV:-$HOME/.claude/channels/telegram/.env}"
+if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && [ -f "$TG_ENV" ]; then
+  TELEGRAM_BOT_TOKEN="$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' "$TG_ENV" | head -1)"
+fi
+[ -n "${TELEGRAM_BOT_TOKEN:-}" ] || { echo "tg-send: TELEGRAM_BOT_TOKEN not set and not in $TG_ENV" >&2; exit 1; }
+[ -n "$TEXT" ] || { echo "tg-send: empty message" >&2; exit 1; }
+
+send_chunk() {
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${CHAT_ID}" \
+    --data-urlencode "text=$1" \
+    --data-urlencode "disable_web_page_preview=true" 2>/dev/null
+}
+
+REST="$TEXT"
+while [ -n "$REST" ]; do
+  CHUNK="$REST"; REST=""
+  if [ "${#CHUNK}" -gt 4000 ]; then
+    HEAD="${CHUNK:0:4000}"
+    # cut at the last newline inside the window when there is one
+    TAIL_AFTER_NL="${HEAD##*$'\n'}"
+    if [ "$TAIL_AFTER_NL" != "$HEAD" ]; then
+      HEAD="${HEAD%$'\n'*}"
+      REST="${CHUNK:$(( ${#HEAD} + 1 ))}"
+    else
+      REST="${CHUNK:4000}"
+    fi
+    CHUNK="$HEAD"
+  fi
+  CODE="$(send_chunk "$CHUNK")"
+  if [ "$CODE" != "200" ]; then
+    sleep 2
+    CODE="$(send_chunk "$CHUNK")"
+  fi
+  if [ "$CODE" != "200" ]; then
+    echo "tg-send: sendMessage failed (HTTP $CODE)" >&2
+    exit 1
+  fi
+done
+exit 0
