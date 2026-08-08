@@ -10,6 +10,10 @@
 # Needs VENICE_API_KEY (sourced from /home/dev/.env).
 set -uo pipefail
 
+# Cron's PATH has no ~/.local/bin, where pipx's `council` and the claude CLI live.
+# Without this the sweep silently falls back to the repo module. Same fix as loom.
+export PATH="$HOME/.local/bin:$PATH"
+
 [ -f /home/dev/.env ] && set -a && . /home/dev/.env && set +a
 : "${VENICE_API_KEY:?VENICE_API_KEY not set}"
 

@@ -9,6 +9,12 @@
 #  - On failure it still pings Telegram, so silence never hides a break.
 set -uo pipefail
 
+# Cron's PATH has no ~/.local/bin, where the claude CLI lives since the 2026-07-25
+# installer migration. Without this every run dies rc=127 before doing anything —
+# the 2026-08-05..08-08 silent outage (the failure ping needed claude too, then).
+# Same fix loom's runner has carried since its 07-26..08-01 outage.
+export PATH="$HOME/.local/bin:$PATH"
+
 MODE="${1:-morning}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPT_FILE="$DIR/prompts/briefing-$MODE.md"

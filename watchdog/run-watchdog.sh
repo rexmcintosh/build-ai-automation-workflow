@@ -10,6 +10,11 @@
 #   --dry-run : run the pre-check and print what WOULD escalate; never calls the agent.
 set -uo pipefail
 
+# Cron's PATH has no ~/.local/bin, where the claude CLI lives since the 2026-07-25
+# installer migration. Without this every escalation dies rc=127 (2026-08-08: the
+# alert about bebop's own outage failed to send). Same fix as loom's runner.
+export PATH="$HOME/.local/bin:$PATH"
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE="$(cd "$DIR/.." && pwd)"
 PROMPT_FILE="$DIR/prompts/investigate.md"
