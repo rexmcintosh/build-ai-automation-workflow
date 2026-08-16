@@ -53,3 +53,39 @@ def test_gather_file_context_caps_large_files(tmp_path):
     diff = ("diff --git a/big.js b/big.js\n--- a/big.js\n+++ b/big.js\n@@ -1 +1 @@\n-a\n+b\n")
     ctx = vr.gather_file_context(diff, tmp_path, per_file_cap=1000)
     assert "truncated" in ctx                # truncate() marker, didn't dump the whole file
+
+
+def test_main_fails_closed_on_missing_env(monkeypatch, capsys):
+    for k in vr.REQUIRED_ENV:
+        monkeypatch.delenv(k, raising=False)
+    assert vr.main() == 1
+    err = capsys.readouterr().err
+    assert "missing required env" in err and "VENICE_API_KEY" in err
+
+
+def test_gather_file_context_total_cap_counts_utf8_bytes(tmp_path):
+    # 400 chars of a 3-byte glyph = 1200 bytes; a 500-byte total cap must exclude it
+    # even though the character count alone would fit.
+    (tmp_path / "pt.md").write_text("€" * 400)
+    diff = ("diff --git a/pt.md b/pt.md\n--- a/pt.md\n+++ b/pt.md\n@@ -1 +1 @@\n-a\n+b\n")
+    ctx = vr.gather_file_context(diff, tmp_path, per_file_cap=40_000, total_cap=500)
+    assert "€" not in ctx
+
+
+def test_gh_retries_transient_failures(monkeypatch):
+    import requests as _requests
+    calls = {"n": 0}
+
+    class _OK:
+        status_code = 200
+
+    def flaky(method, url, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _requests.ConnectionError("blip")
+        return _OK()
+
+    monkeypatch.setattr(vr.requests, "request", flaky)
+    monkeypatch.setattr(vr.time, "sleep", lambda s: None)
+    assert vr._gh("GET", "https://api.example/x", "tok").status_code == 200
+    assert calls["n"] == 3

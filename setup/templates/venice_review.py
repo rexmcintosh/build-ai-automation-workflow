@@ -15,12 +15,26 @@ Audit-driven behavior (see docs/council-audit-2026-06-25.md):
     on findings); genuine engine/infra failures still fail closed.
   - E3: the gate path runs at temperature 0 for run-to-run determinism.
 
+Hardening (see docs/venice-review-shim-audit-2026-07-23.md in build-ai-automation-workflow):
+  - Diff-derived paths are untrusted (council.routing.changed_paths extracts them
+    verbatim), so gather_file_context resolves each one and skips anything outside the
+    checkout root — a crafted diff cannot exfiltrate files via the review API/comment.
+  - A non-numeric COUNCIL_FILE_CAP falls back to the default instead of crashing.
+
+Hardening round 2 (council self-review of the CI rollout, 2026-08-15):
+  - GitHub API calls retry on connection errors and 5xx, so a network blip can't
+    silently drop the review comment.
+  - The file-context total cap counts UTF-8 bytes like the per-file cap, not
+    characters — multi-byte text no longer overshoots the engine byte budget.
+  - Required env vars are validated upfront with a clear error instead of a
+    KeyError traceback (fail closed, same as an engine failure).
+
 Required env: VENICE_API_KEY, GITHUB_TOKEN, PR_NUMBER, REPO, DIFF_PATH
 Optional env: COUNCIL_ENFORCE (default "1"), COUNCIL_FILE_CAP (bytes/file, default 40000),
               GITHUB_WORKSPACE (checkout root, default ".")
 """
 from __future__ import annotations
-import os, sys
+import os, sys, time
 from pathlib import Path
 
 import requests
@@ -31,6 +45,7 @@ from council.routing import changed_paths
 
 GITHUB_API = "https://api.github.com"
 MARKER = "<!-- council-review -->"            # identifies our comment for in-place updates
+REQUIRED_ENV = ("VENICE_API_KEY", "GITHUB_TOKEN", "PR_NUMBER", "REPO", "DIFF_PATH")
 # Cheap repo anchors that kill the most common diff-blind false positives (an engines
 # pin, a gitignored secret) regardless of whether they appear in the hunk.
 ANCHORS = ("package.json", ".gitignore", ".nvmrc")
@@ -39,33 +54,56 @@ ANCHORS = ("package.json", ".gitignore", ".nvmrc")
 def gather_file_context(diff, root, *, per_file_cap=40_000, total_cap=160_000):
     """Full contents of each changed file in the diff (plus repo anchors), read from
     the checkout at `root`, so the panel and chair can verify findings against the real
-    code. Capped per file and overall to stay within the engine byte budget. Missing
-    files (deletes, renames, absent anchors) are skipped, never fatal."""
-    root = Path(root)
+    code. Capped per file and overall — both in UTF-8 bytes — to stay within the
+    engine byte budget. Missing files (deletes, renames, absent anchors) are skipped,
+    never fatal."""
+    root = Path(root).resolve()
     seen, parts, total = set(), [], 0
     for rel in list(changed_paths(diff)) + list(ANCHORS):
         if not rel or rel in seen:
             continue
         seen.add(rel)
         try:
-            text = (root / rel).read_text(encoding="utf-8", errors="ignore")
+            # Diff-derived paths are untrusted: refuse absolute/`..` escapes so a
+            # crafted diff can never read outside the checkout.
+            candidate = (root / rel).resolve()
+            if not candidate.is_relative_to(root):
+                continue
+            text = candidate.read_text(encoding="utf-8", errors="ignore")
         except (OSError, ValueError):
             continue
         if len(text.encode("utf-8", "ignore")) > per_file_cap:
             text = truncate(text, per_file_cap)
         block = f"=== {rel} ===\n{text}\n"
-        if total + len(block) > total_cap:
+        block_bytes = len(block.encode("utf-8", "ignore"))
+        if total + block_bytes > total_cap:
             break
         parts.append(block)
-        total += len(block)
+        total += block_bytes
     return "\n".join(parts)
 
 
 def _gh(method, url, token, **kw):
-    return requests.request(method, url,
-                            headers={"Authorization": f"Bearer {token}",
-                                     "Accept": "application/vnd.github+json"},
-                            timeout=30, **kw)
+    """One GitHub API call, retried on connection errors and 5xx (3 attempts,
+    exponential backoff) so a transient blip can't drop the review comment."""
+    last_response, last_error = None, None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 ** attempt)
+        try:
+            r = requests.request(method, url,
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Accept": "application/vnd.github+json"},
+                                 timeout=30, **kw)
+        except requests.RequestException as err:
+            last_error = err
+            continue
+        if r.status_code < 500:
+            return r
+        last_response = r
+    if last_response is not None:
+        return last_response
+    raise last_error
 
 
 def find_council_comment(repo, pr, token):
@@ -96,14 +134,22 @@ def post_comment(repo, pr, body, token):   # back-compat alias
 
 
 def main() -> int:
+    missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    if missing:
+        print(f"::error::missing required env: {', '.join(missing)} — failing closed",
+              file=sys.stderr)
+        return 1
     settings, panels = load_panels()
     diff = truncate(Path(os.environ["DIFF_PATH"]).read_text(), settings.byte_cap)
     if not diff.strip():
         print("Empty diff, nothing to review.")
         return 0
+    try:
+        file_cap = int(os.environ.get("COUNCIL_FILE_CAP", "40000"))
+    except ValueError:
+        file_cap = 40_000
     file_context = gather_file_context(
-        diff, os.environ.get("GITHUB_WORKSPACE", "."),
-        per_file_cap=int(os.environ.get("COUNCIL_FILE_CAP", "40000")))
+        diff, os.environ.get("GITHUB_WORKSPACE", "."), per_file_cap=file_cap)
     # temperature=0 on the gate path for run-to-run determinism (audit E3/B).
     client = VeniceClient(get_api_key(), timeout=settings.timeout, temperature=0)
     body, blocking, unavailable = run_pr_review(
