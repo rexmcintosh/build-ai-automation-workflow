@@ -63,18 +63,35 @@ if [ "$ESCALATE" != "1" ]; then
   exit 0
 fi
 
+# --- build the investigator briefing (shown in full by --dry-run) ---
+# File-freshness table: the investigator is read-only with no shell, so it can't
+# ask how old a file is. Collect mtimes for every authorized log root here and
+# inject them, so stale evidence is visible AS stale (2026-08-16: a runs.log.err
+# untouched for 2 weeks got blamed as the live cause of a disk alert).
+# Newest-first, capped: splash_poller/logs alone holds dozens of dead poller-*.log
+# files, and the investigator runs on a small model — old tail stays out.
+ALL_FILES="$(find "$BASE/bebop/logs" "$BASE/loom/logs" "$BASE/watchdog/logs" \
+                  /home/dev/projects/splash_poller/logs \
+                  -maxdepth 1 -type f \
+                  -printf '%T@ %TY-%Tm-%Td %TH:%TM  %9s  %p\n' 2>/dev/null | sort -rn)"
+FILES="$(printf '%s\n' "$ALL_FILES" | head -40 | cut -d' ' -f2-)"
+N_FILES="$(printf '%s\n' "$ALL_FILES" | grep -c .)"
+[ "$N_FILES" -gt 40 ] && FILES="$FILES
+(+ $((N_FILES - 40)) older files omitted)"
+PROMPT="$(cat "$PROMPT_FILE")"
+PROMPT="${PROMPT//\{\{NOW\}\}/$NOW_HUMAN}"
+PROMPT="${PROMPT//\{\{REPORT\}\}/$REPORT}"
+PROMPT="${PROMPT//\{\{FILES\}\}/$FILES}"
+PROMPT="${PROMPT//\{\{BASE\}\}/$BASE}"
+PROMPT="${PROMPT//\{\{CHAT_ID\}\}/$CHAT_ID}"
+
 if [ "$DRY_RUN" = "1" ]; then
   echo "[$TS] DRY-RUN escalate=1" >> "$LOG"
-  echo "WOULD ESCALATE:"; printf '%s\n' "$REPORT"
+  echo "WOULD ESCALATE — investigator briefing:"; printf '%s\n' "$PROMPT"
   exit 0
 fi
 
 # --- escalation: read-only investigator agent -> Telegram ---
-PROMPT="$(cat "$PROMPT_FILE")"
-PROMPT="${PROMPT//\{\{NOW\}\}/$NOW_HUMAN}"
-PROMPT="${PROMPT//\{\{REPORT\}\}/$REPORT}"
-PROMPT="${PROMPT//\{\{BASE\}\}/$BASE}"
-PROMPT="${PROMPT//\{\{CHAT_ID\}\}/$CHAT_ID}"
 
 # Read-only by construction: Read (logs) only. No Bash/Write/Edit, no send tools —
 # the investigator COMPOSES the alert; delivery happens below via raw Bot API
