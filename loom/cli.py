@@ -12,6 +12,10 @@
                                          committed; reject -> rejected). No model call,
                                          no wiki write.
   requeue <session_id>                   return a quarantined/stuck session to pending
+  fixup-triage [--apply]                 one-time 2026-08 triage repairs (dry-run default):
+                                         skip self-generated transcripts, recover sessions
+                                         lost to fenced distill output, quarantine still-
+                                         unreadable artifacts, clear stale people/ routes
   rollback --ts <stamp>                  restore ~/.claude from a promote backup
 """
 from __future__ import annotations
@@ -88,6 +92,7 @@ def main(argv=None) -> int:
     rsg.add_argument("--reject", action="store_true",
                      help="the fact should never land -> rejected")
     rq = sub.add_parser("requeue"); rq.add_argument("session_id")
+    fx = sub.add_parser("fixup-triage"); fx.add_argument("--apply", action="store_true")
     rb = sub.add_parser("rollback"); rb.add_argument("--ts", required=True)
 
     args = parser.parse_args(argv)
@@ -165,6 +170,9 @@ def main(argv=None) -> int:
         # (A committed session won't re-weave: git trailers reconcile it back to committed.)
         LoomState(cfg.state_path).advance(args.session_id, "pending")
         print(json.dumps({"requeued": args.session_id})); return 0
+    if args.cmd == "fixup-triage":
+        from .fixup import triage_fixup
+        print(json.dumps(triage_fixup(cfg, apply=args.apply), cls=_PathEncoder)); return 0
     if args.cmd == "rollback":
         res = rollback(backups_dir=cfg.loom_dir / "promote-backups", ts=args.ts)
         print(json.dumps(res, cls=_PathEncoder)); return 0

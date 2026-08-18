@@ -70,9 +70,10 @@ def _suggested_target(learning: dict, wiki_root: Optional[Path] = None) -> Optio
 
 
 def confirm_route(backend, learning: dict, index_listing: str,
-                  wiki_root: Optional[Path] = None) -> Optional[dict]:
+                  wiki_root: Optional[Path] = None, roster: str = "") -> Optional[dict]:
     prompt = (_PROMPTS / "route.md").read_text()
     user = prompt.replace("{{LEARNING}}", json.dumps(learning, ensure_ascii=False)) \
+                 .replace("{{ROSTER}}", roster or "(none)") \
                  .replace("{{INDEX}}", index_listing or "(empty)")
     try:
         raw = backend.complete("route", "Route one learning. Output only JSON.", user, json_mode=True)
