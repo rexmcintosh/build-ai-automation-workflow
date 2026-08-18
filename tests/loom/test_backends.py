@@ -28,7 +28,7 @@ def test_venice_backend_maps_roles(monkeypatch):
     monkeypatch.setattr(backends, "VeniceClient", FakeClient)
     b = backends.get_backend("venice", api_key="k")
     assert b.complete("weave", "s", "u") == "VOUT"
-    assert captured["model"] == "claude-opus-4-8"
+    assert captured["model"] == "deepseek-v4-pro"
     assert captured["task"] == "weave"
     b.complete("route", "s", "u", json_mode=True)
     assert captured["model"] == "deepseek-v4-flash" and captured["json_mode"] is True
