@@ -109,7 +109,7 @@ def _index_listing(wiki: Path) -> str:
 def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
            max_targets: int = 10, today: str = "", deadline_seconds=None,
            max_per_target: int = 4, distill: bool = True,
-           weave_reserve: float = 0.4) -> Dict[str, object]:
+           weave_reserve: float = 0.4, max_distill: Optional[int] = None) -> Dict[str, object]:
     state = LoomState(cfg.state_path)
     learnings_dir = cfg.loom_dir / "learnings"
     spool_dir = cfg.loom_dir / "spool"
@@ -144,6 +144,10 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     roster = _roster_text(cfg)
     if distill:
         for transcript in find_pending(cfg.projects_dir, state):
+            if max_distill is not None and summary["distilled"] >= max_distill:
+                # Per-run cap for drain jobs: the diem harness hard-kills at its
+                # deadline, so each backfill chunk must be bounded, not open-ended.
+                break
             if _past(distill_deadline):
                 summary["deadline_hit"] = True
                 summary["distill_deadline_hit"] = True

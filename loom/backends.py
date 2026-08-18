@@ -10,7 +10,13 @@ from . import llm
 from .venice import VeniceClient
 
 CLAUDE_MODELS = {"distill": "sonnet", "route": "haiku", "weave": "opus"}
-VENICE_MODELS = {"route": "gemini-3-5-flash", "weave": "claude-opus-4-8"}
+# Route/distill are validated-output, high-volume stages — priced for volume
+# (deepseek-v4-flash: 1M ctx, ~11x cheaper than the gemini flash it replaced).
+# Weave: deepseek-v4-pro won the 2026-08-18 bake-off vs claude-opus-4-8 /
+# kimi-k2-6 / glm-5 — identical guard-pass rate (19/20, shared failure was a
+# content-level sentinel trip), comparable article quality, 5.7x cheaper.
+VENICE_MODELS = {"distill": "deepseek-v4-flash", "route": "deepseek-v4-flash",
+                 "weave": "deepseek-v4-pro"}
 
 
 class Backend:
@@ -32,7 +38,8 @@ class VeniceBackend(Backend):
     def __init__(self, api_key: str) -> None:
         self._client = VeniceClient(api_key)
     def complete(self, role: str, system: str, user: str, json_mode: bool = False) -> str:
-        return self._client.complete(VENICE_MODELS[role], system, user, json_mode=json_mode)
+        return self._client.complete(VENICE_MODELS[role], system, user,
+                                     json_mode=json_mode, task=role)
 
 
 def get_backend(name: str, api_key: Optional[str] = None) -> Backend:
