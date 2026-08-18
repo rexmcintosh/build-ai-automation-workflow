@@ -20,7 +20,17 @@ def test_backfill_uses_venice_skips_distill_and_caps(monkeypatch):
     assert rc == 0
     assert seen["backend"] == "venice" and seen["shadow"] is False
     assert seen["max_targets"] == 3 and seen["max_per_target"] == 2
-    assert seen["distill"] is False          # backfill never distills
+    assert seen["distill"] is False          # default: weave-only, no distill
+    assert seen["max_distill"] is None
+
+def test_backfill_distill_flag_enables_venice_distill(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "absorb",
+                        lambda cfg, **k: seen.update(k) or {"committed": 0})
+    rc = cli.main(["backfill", "--distill", "25"])
+    assert rc == 0
+    assert seen["backend"] == "venice"
+    assert seen["distill"] is True and seen["max_distill"] == 25
 
 def test_absorb_live_flag_uses_claude_and_distills(monkeypatch):
     seen = {}

@@ -265,3 +265,19 @@ def test_is_loom_generated_handles_content_block_lists(tmp_path):
     t = tmp_path / "c.jsonl"
     t.write_text('{"type":"user","message":{"content":[{"type":"text","text":"<!-- loom/prompts/distill.md -->"}]}}\n')
     assert is_loom_generated(t) is True
+
+
+def test_max_distill_caps_sessions_per_run(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    for i in range(5):
+        t = projects / "p1" / f"s{i}.jsonl"
+        t.parent.mkdir(parents=True, exist_ok=True)
+        t.write_text('{"type":"user","message":{"content":"fact %d"}}\n' % i)
+    cfg = run_mod.Config(projects_dir=projects, loom_dir=tmp_path / "loom",
+                         state_path=tmp_path / "loom" / "state.json")
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    monkeypatch.setattr(run_mod.llm, "run", lambda prompt, model, **k: VALID_YAML)
+    summary = run_mod.absorb(cfg, shadow=True, max_distill=2)
+    assert summary["distilled"] == 2
+    summary = run_mod.absorb(cfg, shadow=True, max_distill=None)
+    assert summary["distilled"] == 3                     # the rest

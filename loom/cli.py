@@ -2,7 +2,10 @@
 """`python -m loom.cli <cmd>`:
   absorb [--live] [--max-targets N] [--deadline-seconds S] [--weave-reserve F]
                                          nightly distill (+weave if --live), backend=claude
-  backfill [--max-targets N] [--all]     backlog weave, backend=venice (DIEM)
+  backfill [--max-targets N] [--all] [--distill N]
+                                         backlog weave, backend=venice (DIEM);
+                                         --distill N also distills up to N pending
+                                         sessions on Venice first (default 0: weave only)
   promote [--auto]                       apply staged .claude + merge loom-shadow -> master
                                          (--auto: only if the unattended gate allows)
   hold [--clear]                         veto tonight's auto-promote (self-expires next day)
@@ -79,6 +82,8 @@ def main(argv=None) -> int:
     b.add_argument("--max-targets", type=int, default=10)
     b.add_argument("--max-per-target", type=int, default=4)
     b.add_argument("--all", action="store_true")
+    b.add_argument("--distill", type=int, default=0, metavar="N",
+                   help="also distill up to N pending sessions on the Venice backend")
 
     pr = sub.add_parser("promote")
     pr.add_argument("--auto", action="store_true")
@@ -107,10 +112,13 @@ def main(argv=None) -> int:
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "backfill":
         cap = 10 ** 9 if args.all else args.max_targets
-        # distill=False: backfill weaves the already-distilled backlog on Venice/DIEM only;
-        # it never distills new pending sessions (that's the nightly Claude-backed absorb's job).
+        # By default backfill only weaves the already-distilled backlog on Venice/DIEM.
+        # --distill N additionally distills up to N pending sessions on Venice
+        # (deepseek-v4-flash, 1M ctx) so backlog distillation rides DIEM instead of
+        # waiting on the nightly Claude window.
         summary = absorb(cfg, shadow=False, backend="venice", max_targets=cap,
-                         max_per_target=args.max_per_target, today=today, distill=False)
+                         max_per_target=args.max_per_target, today=today,
+                         distill=args.distill > 0, max_distill=args.distill or None)
         print(json.dumps(summary, cls=_PathEncoder)); return 0
     if args.cmd == "promote":
         landed = {}

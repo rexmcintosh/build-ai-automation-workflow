@@ -22,15 +22,18 @@ def test_venice_backend_maps_roles(monkeypatch):
     captured = {}
     class FakeClient:
         def __init__(self, *a, **k): pass
-        def complete(self, model, system, user, json_mode=False):
-            captured.update(model=model, json_mode=json_mode)
+        def complete(self, model, system, user, json_mode=False, task="weave"):
+            captured.update(model=model, json_mode=json_mode, task=task)
             return "VOUT"
     monkeypatch.setattr(backends, "VeniceClient", FakeClient)
     b = backends.get_backend("venice", api_key="k")
     assert b.complete("weave", "s", "u") == "VOUT"
     assert captured["model"] == "claude-opus-4-8"
+    assert captured["task"] == "weave"
     b.complete("route", "s", "u", json_mode=True)
-    assert captured["model"] == "gemini-3-5-flash" and captured["json_mode"] is True
+    assert captured["model"] == "deepseek-v4-flash" and captured["json_mode"] is True
+    b.complete("distill", "s", "u")
+    assert captured["model"] == "deepseek-v4-flash" and captured["task"] == "distill"
 
 
 def test_unknown_backend_raises():

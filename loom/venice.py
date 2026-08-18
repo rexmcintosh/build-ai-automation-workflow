@@ -36,14 +36,14 @@ class VeniceClient:
             return text.replace(self.api_key, "<redacted>")
         return text
 
-    def _log_usage(self, data: dict, model: str) -> None:
+    def _log_usage(self, data: dict, model: str, task: str = "weave") -> None:
         # Usage logging must never break or slow the Venice call — swallow everything.
         try:
             import venice_usage
             usage = data.get("usage") or {} if isinstance(data, dict) else {}
             venice_usage.append(
                 project="loom",
-                task_type="weave",
+                task_type=task,
                 model=model,
                 tokens_in=usage.get("prompt_tokens") or 0,
                 tokens_out=usage.get("completion_tokens") or 0,
@@ -52,7 +52,8 @@ class VeniceClient:
         except Exception:
             pass
 
-    def complete(self, model: str, system: str, user: str, *, json_mode: bool = False) -> str:
+    def complete(self, model: str, system: str, user: str, *, json_mode: bool = False,
+                 task: str = "weave") -> str:
         payload = {
             "model": model,
             "messages": [
@@ -88,6 +89,6 @@ class VeniceClient:
                 content = data["choices"][0]["message"]["content"]
             except Exception as e:
                 raise VeniceError(f"Venice returned an unparseable response: {e}") from e
-            self._log_usage(data, model)
+            self._log_usage(data, model, task)
             return content
         raise VeniceError(f"Venice call failed after {self.retries + 1} tries: {last}")
