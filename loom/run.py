@@ -4,7 +4,9 @@ plus v1 weave (route -> group/cap -> weave -> commit on loom-shadow). Shadow mod
 keeps v0 behavior; live mode runs the weave."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -14,7 +16,7 @@ from typing import Callable, Dict, List, Optional
 import yaml
 
 from .backends import get_backend
-from .discovery import find_pending, session_id_for
+from .discovery import find_pending, is_loom_generated, session_id_for
 from .fingerprint import learning_id
 from .gate import scan_clean
 from .gitio import ShadowRepo
@@ -42,16 +44,61 @@ class Config:
     ledger_path: Optional[Path] = None
 
 
-def _distill_prompt(text: str) -> str:
-    return (_PROMPTS / "distill.md").read_text(encoding="utf-8").replace("{{TRANSCRIPT}}", text)
+def _distill_prompt(text: str, roster: str = "") -> str:
+    return (_PROMPTS / "distill.md").read_text(encoding="utf-8") \
+        .replace("{{ROSTER}}", roster or "(none)") \
+        .replace("{{TRANSCRIPT}}", text)
+
+
+def _roster_text(cfg: "Config") -> str:
+    """The identity roster (`_roster.md` at the wiki root): who the recurring people
+    are and their canonical articles. Human-edited (Obsidian); absent is valid."""
+    for root in (cfg.wiki_master, cfg.wiki_worktree):
+        if root:
+            p = Path(root) / "_roster.md"
+            if p.exists():
+                return p.read_text(encoding="utf-8").strip()
+    return ""
+
+
+class LearningsParseError(ValueError):
+    """Nonempty distill output that yields no usable learnings (fenced beyond
+    repair, prose-wrapped, invalid YAML). Must be surfaced, never treated as a
+    zero-learning session: that silently discarded real facts for weeks — the
+    2026-08 case lost 'Rex has a son named Cai' behind a ```yaml fence."""
+
+
+_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n?\s*```\s*$", re.S)
+
+# A learning deferred this many times by weave exceptions is dead-lettered
+# (quarantined for human review) instead of re-queued: four poisoned learnings
+# each reached 261 deferrals by 2026-08-16, hogging the nightly target slots.
+_DEAD_LETTER_DEFERRALS = 5
+
+
+def _strip_fences(text: str) -> str:
+    m = _FENCE_RE.match(text)
+    return m.group(1) if m else text
 
 
 def _parse_learnings(artifact_text: str) -> List[dict]:
-    try:
-        data = yaml.safe_load(artifact_text)
-    except Exception:
+    """Parse a distill artifact. Genuinely empty output (blank, `[]`, `null`) is a
+    legitimate zero-learning result and returns []. Anything else that yields no
+    usable learning raises LearningsParseError."""
+    text = _strip_fences(artifact_text.strip())
+    if not text.strip():
         return []
-    return [d for d in (data or []) if isinstance(d, dict) and d.get("learning")]
+    try:
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        raise LearningsParseError(f"invalid YAML: {exc}") from exc
+    if data is None or data == []:
+        return []
+    items = [d for d in data if isinstance(d, dict) and d.get("learning")] \
+        if isinstance(data, list) else []
+    if not items:
+        raise LearningsParseError("nonempty distill output has no usable learnings")
+    return items
 
 
 def _index_listing(wiki: Path) -> str:
@@ -69,7 +116,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     quarantine_dir = cfg.loom_dir / "quarantine"
     # "quarantined" = SESSIONS whose transcript failed the secret gate.
     # "quarantined_learnings" = individual learnings whose weave failed a guard.
-    summary = {"distilled": 0, "quarantined": 0, "failed": 0,
+    summary = {"distilled": 0, "quarantined": 0, "failed": 0, "self_skipped": 0,
                "committed": 0, "deferred": 0, "quarantined_learnings": 0,
                "deadline_hit": False, "distill_deadline_hit": False, "limit_hit": False}
 
@@ -94,6 +141,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     # `distill=False` (used by `backfill`) weaves the already-distilled backlog only — it never
     # tries to distill new pending sessions (the nightly `absorb` on the Claude backend does that).
     be = get_backend(backend)
+    roster = _roster_text(cfg)
     if distill:
         for transcript in find_pending(cfg.projects_dir, state):
             if _past(distill_deadline):
@@ -102,6 +150,13 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
                 break
             sid = session_id_for(transcript)
             if _STAGE_ORDER[state.state_of(sid)] >= _STAGE_ORDER["distilled"]:
+                continue
+            if is_loom_generated(transcript):
+                # Loom's own `claude -p` calls persist transcripts under the same
+                # projects dir. Distilling them feeds the pipeline its own output —
+                # that loop is how the wiki filled with loom-about-loom articles.
+                state.advance(sid, "committed")
+                summary["self_skipped"] += 1
                 continue
             if not scan_clean(transcript):
                 quarantine_dir.mkdir(parents=True, exist_ok=True)
@@ -112,7 +167,17 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
             spool_copy(transcript, spool_dir)
             try:
                 text = extract_text(transcript)
-                learnings = be.complete("distill", "Extract durable learnings.", _distill_prompt(text))
+                learnings, parse_ok = "", False
+                for attempt in (1, 2):
+                    learnings = be.complete("distill", "Extract durable learnings.",
+                                            _distill_prompt(text, roster))
+                    try:
+                        _parse_learnings(learnings)
+                        parse_ok = True
+                        break
+                    except LearningsParseError:
+                        logging.warning("distill output unparseable for %s (attempt %d)",
+                                        transcript.name, attempt)
             except llm.UsageLimitError:
                 summary["limit_hit"] = True
                 break
@@ -129,6 +194,14 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
                 shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
                 state.advance(sid, "quarantined")
                 summary["quarantined"] += 1
+                continue
+            if not parse_ok:
+                # Never settle malformed output as a zero-learning session.
+                quarantine_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(tmp_artifact), str(quarantine_dir / f"{sid}.md"))
+                state.advance(sid, "quarantined")
+                summary["quarantined"] += 1
+                logging.error("distill output unparseable after retry; quarantined %s", sid)
                 continue
             tmp_artifact.rename(artifact)
             state.advance(sid, "distilled")
@@ -153,6 +226,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
     ledger = WeaveLedger(cfg.ledger_path)
     ledger.reconcile_from_git(repo.committed_ids())          # git is authoritative
     be = get_backend(backend_name)
+    roster = _roster_text(cfg)
     index_listing = _index_listing(cfg.wiki_worktree)
     learnings_dir = cfg.loom_dir / "learnings"
 
@@ -165,11 +239,27 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
     dirs: Dict[str, str] = {}
     session_learnings: Dict[str, List[str]] = {}
     for sid in sessions:
+        if expired():
+            # Routing burns model calls too; without this check a long routing
+            # phase could run past the deadline before the first weave.
+            summary["deadline_hit"] = True
+            break
         art = learnings_dir / f"{sid}.md"
         if not art.exists():
             state.advance(sid, "committed")                 # zero-learning session
             continue
-        items = _parse_learnings(art.read_text(encoding="utf-8"))
+        try:
+            items = _parse_learnings(art.read_text(encoding="utf-8"))
+        except LearningsParseError:
+            # Legacy malformed artifact (pre-validation era). Surface it — the old
+            # behavior settled these as zero-learning sessions and lost the facts.
+            quarantine_dir = cfg.loom_dir / "quarantine"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(art), str(quarantine_dir / art.name))
+            state.advance(sid, "quarantined")
+            summary["quarantined"] += 1
+            logging.error("unparseable learnings artifact quarantined: %s", art.name)
+            continue
         if not items:
             state.advance(sid, "committed")
             continue
@@ -191,7 +281,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
                     logging.warning("route: refused stale cached target %r for %s",
                                     cached["target"], lid)
                 route = confirm_route(be, learning, index_listing,
-                                      wiki_root=cfg.wiki_worktree)
+                                      wiki_root=cfg.wiki_worktree, roster=roster)
                 if not route:
                     ledger.defer(lid, "unroutable")
                     continue
@@ -204,6 +294,9 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
         session_learnings[sid] = ids_here
 
     targets = list(buckets.keys())
+    # Deterministic daily rotation. Without it the same mtime-ordered head owned
+    # every one of the max_targets slots night after night while the tail starved.
+    targets.sort(key=lambda t: hashlib.sha1(f"{today}:{t}".encode()).hexdigest())
     for target in targets[:max_targets]:
         # Cap learnings woven into ONE target per run: keeps each weave a small, reviewable
         # diff and stops a popular pre-existing article from triggering a bisect/cost storm.
@@ -219,14 +312,21 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
                 summary["deferred"] += 1
             continue
         try:
-            res = weave_target(be, repo, ledger, target, dirs[target], weave_now, today=today)
+            res = weave_target(be, repo, ledger, target, dirs[target], weave_now,
+                               today=today, roster=roster)
         except llm.UsageLimitError:
             raise
         except Exception:
             logging.exception("weave_target failed for %s", target)
             for entry in weave_now:
-                ledger.defer(entry["id"], "weave exception")
-                summary["deferred"] += 1
+                if ledger.entry(entry["id"]).get("deferrals", 0) >= _DEAD_LETTER_DEFERRALS:
+                    # Dead-letter: a learning that keeps blowing up must stop
+                    # re-occupying a nightly slot; surface it for a human instead.
+                    ledger.quarantine(entry["id"], "dead-letter: repeated weave exceptions")
+                    summary["quarantined_learnings"] += 1
+                else:
+                    ledger.defer(entry["id"], "weave exception")
+                    summary["deferred"] += 1
             continue
         summary["committed"] += len(res["committed"])
         summary["quarantined_learnings"] += len(res["quarantined"])

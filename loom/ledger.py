@@ -66,6 +66,18 @@ class WeaveLedger:
             e["status"] = "committed"
         self._save()
 
+    def items(self) -> List[Tuple[str, dict]]:
+        return sorted(self._data.items())
+
+    def clear_route(self, lid: str) -> None:
+        """Drop a cached route so the next run re-routes with current context
+        (index + roster). Status and deferral history are kept."""
+        e = self._data.get(lid)
+        if e:
+            e.pop("target", None)
+            e.pop("action", None)
+            self._save()
+
     def pending_ids(self) -> List[str]:
         return [lid for lid, e in sorted(self._data.items())
                 if e.get("status") not in _SETTLED]
