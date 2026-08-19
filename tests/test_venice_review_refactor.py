@@ -89,3 +89,59 @@ def test_gh_retries_transient_failures(monkeypatch):
     monkeypatch.setattr(vr.time, "sleep", lambda s: None)
     assert vr._gh("GET", "https://api.example/x", "tok").status_code == 200
     assert calls["n"] == 3
+
+
+def test_gh_retries_429_honoring_retry_after(monkeypatch):
+    calls = {"n": 0}
+    slept = []
+
+    class _R:
+        def __init__(self, status, headers=None):
+            self.status_code = status
+            self.headers = headers or {}
+
+    def throttled(method, url, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _R(429, {"Retry-After": "7"})
+        return _R(200)
+
+    monkeypatch.setattr(vr.requests, "request", throttled)
+    monkeypatch.setattr(vr.time, "sleep", lambda s: slept.append(s))
+    assert vr._gh("GET", "https://api.example/x", "tok").status_code == 200
+    assert calls["n"] == 3
+    assert 7 in slept                      # Retry-After honored, not just backoff
+
+
+def test_find_council_comment_ignores_non_bot_marker(monkeypatch):
+    class _R:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return [{"id": 5, "body": f"planted {vr.MARKER}",
+                     "user": {"login": "some-user"}}]
+
+    monkeypatch.setattr(vr, "_gh", lambda *a, **k: _R())
+    assert vr.find_council_comment("o/r", 1, "tok") is None
+
+
+def test_find_council_comment_paginates_past_first_100(monkeypatch):
+    page1 = [{"id": i, "body": "noise", "user": {"login": "x"}} for i in range(100)]
+    page2 = [{"id": 200, "body": f"review {vr.MARKER}",
+              "user": {"login": "github-actions[bot]"}}]
+
+    class _R:
+        status_code = 200
+        def __init__(self, data):
+            self._data = data
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._data
+
+    def paged(method, url, token, **kw):
+        return _R(page2) if "page=2" in url else _R(page1)
+
+    monkeypatch.setattr(vr, "_gh", paged)
+    assert vr.find_council_comment("o/r", 1, "tok") == 200
