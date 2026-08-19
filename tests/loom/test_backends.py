@@ -33,7 +33,7 @@ def test_venice_backend_maps_roles(monkeypatch):
     b.complete("route", "s", "u", json_mode=True)
     assert captured["model"] == "deepseek-v4-flash" and captured["json_mode"] is True
     b.complete("distill", "s", "u")
-    assert captured["model"] == "deepseek-v4-flash" and captured["task"] == "distill"
+    assert captured["model"] == "deepseek-v4-pro" and captured["task"] == "distill"
 
 
 def test_unknown_backend_raises():
