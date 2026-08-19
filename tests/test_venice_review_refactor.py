@@ -145,3 +145,26 @@ def test_find_council_comment_paginates_past_first_100(monkeypatch):
 
     monkeypatch.setattr(vr, "_gh", paged)
     assert vr.find_council_comment("o/r", 1, "tok") == 200
+
+
+def test_gh_clamps_hostile_retry_after(monkeypatch):
+    calls = {"n": 0}
+    slept = []
+
+    class _R:
+        def __init__(self, status, headers=None):
+            self.status_code = status
+            self.headers = headers or {}
+
+    def hostile(method, url, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _R(429, {"Retry-After": "-5"})
+        if calls["n"] == 2:
+            return _R(429, {"Retry-After": "999999"})
+        return _R(200)
+
+    monkeypatch.setattr(vr.requests, "request", hostile)
+    monkeypatch.setattr(vr.time, "sleep", lambda s: slept.append(s))
+    assert vr._gh("GET", "https://api.example/x", "tok").status_code == 200
+    assert slept == [0, 60]                # negative clamped to 0, huge capped at 60

@@ -113,8 +113,11 @@ def _gh(method, url, token, **kw):
         if r.status_code < 500 and r.status_code not in (429, 408):
             return r
         try:
-            # Cap Retry-After so an adversarial header can't stall the job.
-            delay = min(float(r.headers.get("Retry-After", delay)), 60)
+            # Clamp Retry-After to [0, 60]: an adversarial header can't stall
+            # the job, and a negative/NaN value can't crash time.sleep.
+            ra = float(r.headers.get("Retry-After", delay))
+            if ra == ra:  # NaN != NaN — keep the backoff delay on NaN
+                delay = min(max(ra, 0), 60)
         except (TypeError, ValueError):
             pass
         last_response = r
