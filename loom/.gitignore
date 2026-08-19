@@ -10,3 +10,4 @@ logs/
 promote-backups/
 *.lock
 *.err
+*.tmp
