@@ -29,6 +29,14 @@ Hardening round 2 (council self-review of the CI rollout, 2026-08-15):
   - Required env vars are validated upfront with a clear error instead of a
     KeyError traceback (fail closed, same as an engine failure).
 
+Hardening round 3 (council follow-ups on build-ai-automation-workflow PR #11, 2026-08-16):
+  - GitHub API retries also cover 429/408 throttling, honoring Retry-After (capped).
+  - The rolling comment is only ever PATCHed when it is marker-matched AND authored by
+    github-actions[bot] — a marker planted in a third-party comment can no longer 403
+    the gate closed.
+  - The comment lookup paginates past the first 100 comments, so long PR threads keep
+    the one-rolling-comment invariant.
+
 Required env: VENICE_API_KEY, GITHUB_TOKEN, PR_NUMBER, REPO, DIFF_PATH
 Optional env: COUNCIL_ENFORCE (default "1"), COUNCIL_FILE_CAP (bytes/file, default 40000),
               GITHUB_WORKSPACE (checkout root, default ".")
@@ -45,6 +53,7 @@ from council.routing import changed_paths
 
 GITHUB_API = "https://api.github.com"
 MARKER = "<!-- council-review -->"            # identifies our comment for in-place updates
+COMMENT_AUTHOR = "github-actions[bot]"        # only comments by this author are ours to PATCH
 REQUIRED_ENV = ("VENICE_API_KEY", "GITHUB_TOKEN", "PR_NUMBER", "REPO", "DIFF_PATH")
 # Cheap repo anchors that kill the most common diff-blind false positives (an engines
 # pin, a gitignored secret) regardless of whether they appear in the hunk.
@@ -84,12 +93,15 @@ def gather_file_context(diff, root, *, per_file_cap=40_000, total_cap=160_000):
 
 
 def _gh(method, url, token, **kw):
-    """One GitHub API call, retried on connection errors and 5xx (3 attempts,
-    exponential backoff) so a transient blip can't drop the review comment."""
+    """One GitHub API call, retried on connection errors, 5xx, and transient
+    throttling (429/408, honoring Retry-After) — 3 attempts, exponential backoff
+    — so a blip or a rate-limit burst can't drop the review comment."""
     last_response, last_error = None, None
+    delay = 0
     for attempt in range(3):
         if attempt:
-            time.sleep(2 ** attempt)
+            time.sleep(delay)
+        delay = 2 ** (attempt + 1)
         try:
             r = requests.request(method, url,
                                  headers={"Authorization": f"Bearer {token}",
@@ -98,8 +110,16 @@ def _gh(method, url, token, **kw):
         except requests.RequestException as err:
             last_error = err
             continue
-        if r.status_code < 500:
+        if r.status_code < 500 and r.status_code not in (429, 408):
             return r
+        try:
+            # Clamp Retry-After to [0, 60]: an adversarial header can't stall
+            # the job, and a negative/NaN value can't crash time.sleep.
+            ra = float(r.headers.get("Retry-After", delay))
+            if ra == ra:  # NaN != NaN — keep the backoff delay on NaN
+                delay = min(max(ra, 0), 60)
+        except (TypeError, ValueError):
+            pass
         last_response = r
     if last_response is not None:
         return last_response
@@ -107,12 +127,23 @@ def _gh(method, url, token, **kw):
 
 
 def find_council_comment(repo, pr, token):
-    """The id of our existing council comment on this PR (by marker), or None."""
-    r = _gh("GET", f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments?per_page=100", token)
-    r.raise_for_status()
-    for c in r.json():
-        if MARKER in (c.get("body") or ""):
-            return c["id"]
+    """The id of OUR existing council comment on this PR, or None. Ours means
+    marker present AND authored by the Actions bot — a marker planted in someone
+    else's comment must not be PATCH-targeted (403 → fail-closed DoS). Paginates
+    so a marker beyond the first 100 comments still preserves the one-rolling-
+    comment invariant; capped at 10 pages as a runaway guard."""
+    for page in range(1, 11):
+        r = _gh("GET",
+                f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments?per_page=100&page={page}",
+                token)
+        r.raise_for_status()
+        comments = r.json()
+        for c in comments:
+            if MARKER in (c.get("body") or "") and \
+                    (c.get("user") or {}).get("login") == COMMENT_AUTHOR:
+                return c["id"]
+        if len(comments) < 100:
+            return None
     return None
 
 
