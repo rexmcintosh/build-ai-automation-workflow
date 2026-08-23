@@ -75,6 +75,12 @@ _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n?\s*```\s*$", re.S)
 # each reached 261 deferrals by 2026-08-16, hogging the nightly target slots.
 _DEAD_LETTER_DEFERRALS = 5
 
+# Life-first weave order: targets in these directories claim max_targets slots
+# before any ops target. By 2026-08 only 6.9% of woven learnings landed in these
+# dirs — floods of tooling gotchas kept deferring the rare person/place facts
+# past the nightly caps, which is backwards for a personal wiki.
+_SOFT_DIRS = {"people", "relationships", "places", "companies", "philosophies"}
+
 
 def _strip_fences(text: str) -> str:
     m = _FENCE_RE.match(text)
@@ -298,9 +304,11 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
         session_learnings[sid] = ids_here
 
     targets = list(buckets.keys())
-    # Deterministic daily rotation. Without it the same mtime-ordered head owned
-    # every one of the max_targets slots night after night while the tail starved.
-    targets.sort(key=lambda t: hashlib.sha1(f"{today}:{t}".encode()).hexdigest())
+    # Soft dirs first, then a deterministic daily rotation within each class.
+    # Without the rotation the same mtime-ordered head owned every one of the
+    # max_targets slots night after night while the tail starved.
+    targets.sort(key=lambda t: (0 if dirs[t] in _SOFT_DIRS else 1,
+                                hashlib.sha1(f"{today}:{t}".encode()).hexdigest()))
     for target in targets[:max_targets]:
         # Cap learnings woven into ONE target per run: keeps each weave a small, reviewable
         # diff and stops a popular pre-existing article from triggering a bisect/cost storm.

@@ -332,3 +332,46 @@ def test_poisoned_cached_route_cannot_mint_a_new_toplevel_dir(tmp_path, monkeypa
     assert not (cfg.wiki_worktree / "etc").exists()          # never minted
     assert summary["committed"] == 1
     assert (cfg.wiki_worktree / "people" / "x.md").exists()  # healed via re-route
+
+
+def test_soft_directories_weave_before_ops_targets(tmp_path, monkeypatch):
+    """Life-first weave order: people/ (and other soft dirs) must claim
+    max_targets slots before ops targets, regardless of the daily hash
+    rotation. With today=2026-01-01 the rotation alone would order
+    tools/alpha < tools/beta < people/liam and starve the person."""
+    cfg = _live_cfg(tmp_path)
+    (cfg.wiki_worktree / "tools").mkdir()  # routes may only land in existing dirs
+    monkeypatch.setattr(run_mod, "scan_clean", lambda p: True)
+    def fake_complete(role, system, user, json_mode=False):
+        if role == "route":
+            import json as J
+            if "liam" in user:
+                return J.dumps({"target": "people/liam.md", "action": "create", "cross_links": []})
+            subj = "alpha" if "alpha" in user else "beta"
+            return J.dumps({"target": f"tools/{subj}.md", "action": "create", "cross_links": []})
+        if role == "weave":
+            return "# T\n\nbody.\n"
+        return ("- type: fact\n  subject: alpha\n  learning: alpha tool fact\n  route: wiki/tools/alpha\n"
+                "- type: fact\n  subject: beta\n  learning: beta tool fact\n  route: wiki/tools/beta\n"
+                "- type: fact\n  subject: liam\n  learning: liam swims\n  route: wiki/people/liam\n")
+    class B:
+        def complete(self, role, system, user, json_mode=False):
+            return fake_complete(role, system, user, json_mode)
+    monkeypatch.setattr(run_mod, "get_backend", lambda name, api_key=None: B())
+    summary = run_mod.absorb(cfg, shadow=False, backend="claude", max_targets=1,
+                             today="2026-01-01")
+    assert (cfg.wiki_worktree / "people" / "liam.md").exists()   # person won the slot
+    assert not (cfg.wiki_worktree / "tools" / "alpha.md").exists()
+    assert summary["committed"] == 1 and summary["deferred"] == 2
+
+
+def test_distill_prompt_pins_life_first_editorial_policy():
+    """The 2026-08 audit found 62% of learnings were about loom itself and only
+    6.9% landed in soft dirs. The prompt's editorial policy is the primary
+    control; pin its load-bearing parts so a rewrite can't silently drop them."""
+    text = (Path(run_mod.__file__).parent / "prompts" / "distill.md").read_text()
+    assert text.startswith("<!-- loom/prompts/")          # self-marker: discovery skip
+    for marker in ("TIER 1", "TIER 2", "SETTLED TOPICS", "{{ROSTER}}", "{{TRANSCRIPT}}"):
+        assert marker in text, f"distill.md lost required section: {marker}"
+    assert "at most TWO" in text                          # tech cap
+    assert "extract exhaustively" in text                 # life signal floor
