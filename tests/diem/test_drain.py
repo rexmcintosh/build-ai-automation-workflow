@@ -210,3 +210,45 @@ def test_floor_for_utc_evening_checkpoints():
     assert floor_for(cfg, datetime(2026, 7, 3, 21, 30)) == 40.0
     assert floor_for(cfg, datetime(2026, 7, 3, 23, 5)) == 15.0
     assert floor_for(cfg, datetime(2026, 7, 3, 23, 50)) == 0.0
+
+
+class FileRunner(FakeRunner):
+    """FakeRunner that also writes a loom summary JSON for backfill items,
+    mimicking runners.run_item saving stdout to an output log."""
+    def __init__(self, tmp_path, summary_json):
+        super().__init__()
+        self.dir = tmp_path / "joblogs"
+        self.dir.mkdir(exist_ok=True)
+        self.summary_json = summary_json
+    def __call__(self, item, **kw):
+        self.ran.append(item)
+        out = self.dir / f"{item.id}.log"
+        out.write_text(self.summary_json)
+        return RunResult(True, 10.0, output_path=str(out))
+
+
+def test_filler_stops_after_first_noop_backfill(tmp_path):
+    """2026-08-20..23 regression: an empty-loom morning checkpoint burned all
+    60 daily filler slots on 0.3s no-ops, starving the evening checkpoints.
+    A filler that reports zero work must stop the seeding, not repeat."""
+    cfg = _cfg(tmp_path, backfill_max_per_night=60, backfill_chunk=3)
+    q, est, rev = _bits(tmp_path, cfg)
+    noop = ('{"distilled": 0, "quarantined": 0, "failed": 0, "committed": 0, '
+            '"deferred": 0}')
+    r = FileRunner(tmp_path, noop)
+    summary = run_checkpoint(cfg, now=NOW, balance=FakeBalance([50.0]),
+                             queue=q, estimates=est, reviewed=rev, runner=r)
+    assert len(r.ran) == 1                       # one probe, then stop
+    assert summary["aborted"] is None
+    assert q.night_count("backfill", "2026-07-03T01:00:00") == 1  # cap intact
+
+
+def test_filler_keeps_seeding_while_backfill_is_productive(tmp_path):
+    cfg = _cfg(tmp_path, backfill_max_per_night=2, backfill_chunk=3)
+    q, est, rev = _bits(tmp_path, cfg)
+    busy = '{"distilled": 5, "committed": 4, "deferred": 100}'
+    r = FileRunner(tmp_path, busy)
+    run_checkpoint(cfg, now=NOW, balance=FakeBalance([50.0, 40.0, 30.0, 30.0]),
+                   queue=q, estimates=est, reviewed=rev, runner=r)
+    assert len(r.ran) == 2                       # productive → runs to the cap
+    assert all(i.type == "backfill" for i in r.ran)
