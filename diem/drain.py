@@ -3,13 +3,31 @@
 Interactive evening use is honored implicitly: balance re-read between jobs
 means a human burning DIEM pushes the balance to the floor and we stop."""
 from __future__ import annotations
+import json
 import subprocess
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from .balance import BalanceUnavailable
 from .discover import discover
 from .queue import new_item
 from .state import Lock, pause_until
+
+
+def _backfill_did_nothing(res) -> bool:
+    """True when a backfill run's saved loom summary reports zero work
+    (committed==0 and distilled==0). Unreadable or absent output — including
+    a failed run — is NOT treated as a no-op, so detection failures fall back
+    to the old always-seed behavior rather than silently stopping the drain."""
+    if not res.ok or not res.output_path:
+        return False
+    try:
+        summary = json.loads(Path(res.output_path).read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(summary, dict):
+        return False
+    return summary.get("committed") == 0 and summary.get("distilled") == 0
 
 
 def _at(now: datetime, hhmm: str) -> datetime:
@@ -94,6 +112,11 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
         elapsed = 0.0    # simulated wall-clock from job durations (tests inject now)
         attempted = set()  # ids run this checkpoint — failures retry NEXT checkpoint
         skipped_ids = set()  # dedupe: an unfittable item is re-seen every pass
+        filler_ids = set()   # backfills THIS checkpoint seeded (vs banked items)
+        filler_dry = False   # a seeded backfill reported zero work — stop seeding.
+        # Without this, an empty-loom morning checkpoint burned all
+        # backfill_max_per_night slots on ~0.3s no-ops in seconds, so the
+        # evening checkpoints could not seed at all (2026-08-20..23 outage).
         while True:
             try:
                 bal = balance.diem_balance()
@@ -128,12 +151,17 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
 
             if picked is None:
                 # Filler ONLY on a truly empty queue — items that merely don't
-                # fit (budget/deadline) must not spawn backfill noise.
-                if (not pend and queue.night_count("backfill", day_start_iso)
+                # fit (budget/deadline) must not spawn backfill noise, and a
+                # dry loom (a seeded backfill that did zero work) must not
+                # burn the nightly cap on repeat probes.
+                if (not pend and not filler_dry
+                        and queue.night_count("backfill", day_start_iso)
                         < cfg.backfill_max_per_night):
-                    queue.add(new_item("backfill",
-                                       {"max_targets": cfg.backfill_chunk},
-                                       created=now_iso))
+                    it = new_item("backfill",
+                                  {"max_targets": cfg.backfill_chunk},
+                                  created=now_iso)
+                    queue.add(it)
+                    filler_ids.add(it.id)
                     continue  # picked up through the normal budget/deadline gate
                 return summary
 
@@ -152,6 +180,9 @@ def run_checkpoint(cfg, *, now: datetime, balance, queue, estimates, reviewed,
                      "output_path": res.output_path, "error": res.error}
             if getattr(res, "note", None):  # e.g. a healed review baseline
                 entry["note"] = res.note
+            if picked.id in filler_ids and _backfill_did_nothing(res):
+                filler_dry = True
+                entry["noop"] = True
             summary["ran"].append(entry)
             if res.ok:
                 meta = {"ok": True, "cost": cost,
