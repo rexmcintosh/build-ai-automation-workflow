@@ -69,9 +69,10 @@ ACTIVE_STATES = ("open", "in_review", "held")
 TG_CHAT_DEFAULT = "7735693897"
 USAGE_LIMIT_RE = re.compile(r"hit your session limit|usage limit|limit reached|rate limit",
                             re.IGNORECASE)
-OUTCOME_RE = re.compile(r"RUNNER-OUTCOME:\s*`?(done|held|failed)`?", re.IGNORECASE)
-SUMMARY_RE = re.compile(r"RUNNER-SUMMARY:\s*(.*?)(?=\n\s*RUNNER-[A-Z-]+:|\Z)", re.IGNORECASE | re.DOTALL)
-STEPS_RE = re.compile(r"RUNNER-OPERATOR-STEPS:\s*(.*?)(?=\n\s*RUNNER-[A-Z-]+:|\n\s*```|\Z)",
+# Tolerant of markdown dress-up: `**RUNNER-OUTCOME:** done`, `RUNNER-OUTCOME: \`held\``, etc.
+OUTCOME_RE = re.compile(r"RUNNER-OUTCOME\**:?\**\s*[`*_]*(done|held|failed)", re.IGNORECASE)
+SUMMARY_RE = re.compile(r"RUNNER-SUMMARY\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\Z)", re.IGNORECASE | re.DOTALL)
+STEPS_RE = re.compile(r"RUNNER-OPERATOR-STEPS\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\n\s*```|\Z)",
                       re.IGNORECASE | re.DOTALL)
 
 # C2(c): deny rules handed to the session via --settings. Prefix globs; each blocks a
@@ -554,6 +555,9 @@ Rules. They are enforced by the runner and are not negotiable:
 6. Do not ask questions. Make the sensible call, and state each assumption in your summary.
 7. Keep the change scoped to the item. No drive-by refactors.
 8. You have about {minutes} minutes. If you cannot finish, commit what is coherent and report `held` with what remains.
+9. This is a single headless pass: when your turn ends, the session ends. Never start background tasks or agents and then stop to wait for them. Run everything in the foreground and finish in one pass.
+10. The repo's human review and merge protocol does not apply here: do not post a merge recommendation, do not wait for a "do it", do not run pre-merge review steps meant for a human loop. The runner reviews the branch and a human decides in the morning.
+11. Scratch files go in the system temp directory, never in the worktree. Leave no untracked files behind: anything left is committed to the branch as-is and shows up in review.
 
 End your final message with exactly this block. The runner parses it:
 
@@ -579,7 +583,7 @@ def parse_outcome(text: str) -> dict:
     outcome = outcomes[-1].lower() if outcomes else ""
     summaries = SUMMARY_RE.findall(text)
     steps = STEPS_RE.findall(text)
-    clean = lambda s: re.sub(r"\s+", " ", s.strip().strip("`").strip())[:600]  # noqa: E731
+    clean = lambda s: re.sub(r"\s+", " ", s.strip().strip("`*_ ").strip())[:600]  # noqa: E731
     return {
         "outcome": outcome,
         "summary": clean(summaries[-1]) if summaries else "",
@@ -745,16 +749,20 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         denials = data.get("permission_denials") or []
         blob = "\n".join([run["stdout"][-4000:], run["stderr"][-4000:], final_text[-4000:]])
 
-        # leftover uncommitted work -> commit it so the branch holds everything
-        if git(p.worktree, "status", "--porcelain", check=False).strip():
+        # leftover uncommitted work -> commit it so the branch holds everything, and say so
+        leftover = [ln[3:] for ln in git(p.worktree, "status", "--porcelain", check=False).splitlines() if ln.strip()]
+        leftover_note = ""
+        if leftover:
             git(p.worktree, "add", "-A", check=False)
             git(p.worktree, "-c", "user.name=backlog-run", "-c", "user.email=backlog-run@localhost",
                 "commit", "-q", "-m", f"backlog-run: leftover uncommitted work for {iid}", check=False)
+            shown = ", ".join(leftover[:5]) + (f" … +{len(leftover) - 5}" if len(leftover) > 5 else "")
+            leftover_note = f" Leftover uncommitted files were committed as-is ({len(leftover)}): {shown}."
         ahead = git(p.repo, "rev-list", "--count", f"{p.base}..{p.branch}", check=False).strip()
         has_diff = ahead.isdigit() and int(ahead) > 0
         mins = int((time.monotonic() - started) // 60)
         tail = f" [{mins} min, ${result['cost']:.2f}, session {result['session'][:8]}]" if result["session"] else f" [{mins} min]"
-        denial_note = f" Denied tool calls: {len(denials)}." if denials else ""
+        denial_note = (f" Denied tool calls: {len(denials)}." if denials else "") + leftover_note
 
         if run["timed_out"]:
             kind, why = "failed", f"timed out after {cfg.item_timeout}s"
@@ -766,7 +774,8 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         elif parsed["outcome"] in ("done", "held", "failed"):
             kind, why = parsed["outcome"], parsed["summary"]
         else:
-            kind, why = "nomarker", "session ended without a RUNNER-OUTCOME block"
+            kind, why = "nomarker", ("session ended without a RUNNER-OUTCOME block (its last words: "
+                                     + re.sub(r"\s+", " ", final_text.strip())[:160] + ")")
 
         if kind == "limit":
             if has_diff:

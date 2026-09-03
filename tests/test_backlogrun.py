@@ -230,6 +230,8 @@ def test_mutate_backlog_rereads_before_writing(world):
     ("RUNNER-OUTCOME: `held`\nRUNNER-SUMMARY: needs a key\n  second line\nRUNNER-OPERATOR-STEPS: add KEY to ~/.env", "held", "needs a key second line"),
     ("first RUNNER-OUTCOME: failed\n later RUNNER-OUTCOME: done\nRUNNER-SUMMARY: ok", "done", "ok"),
     ("no block here", "", ""),
+    ("**RUNNER-OUTCOME:** done\n**RUNNER-SUMMARY:** bold summary\n**RUNNER-OPERATOR-STEPS:** none", "done", "bold summary"),
+    ("RUNNER-OUTCOME: `held`\nRUNNER-SUMMARY: *needs key*", "held", "needs key"),
 ])
 def test_parse_outcome(text, outcome, summary):
     got = br.parse_outcome(text)
@@ -267,7 +269,8 @@ def test_session_settings_deny_rules(world):
 def test_compose_prompt_carries_contract_and_item():
     text = br.compose_prompt(item("2026-01-01-a", prompt="THE PROMPT"), repo_name="alpha",
                              worktree="/w", branch="claude/bl-a", base="main", minutes=55)
-    for must in ("RUNNER-OUTCOME", "Never push", "claude/bl-a", "THE PROMPT", "55 minutes", "held"):
+    for must in ("RUNNER-OUTCOME", "Never push", "claude/bl-a", "THE PROMPT", "55 minutes", "held",
+                 "Never start background tasks", "do not post a merge recommendation", "system temp directory"):
         assert must in text
 
 
@@ -340,7 +343,8 @@ def test_work_nomarker_with_changes_is_in_review(world):
     (p,) = br.plan(cfg, load_items(cfg))
     res = br.work_one(cfg, p, reviewer=stub_reviewer, log=lambda *a: None)
     assert res["status"] == "in_review"
-    assert "without a RUNNER-OUTCOME" in load_items(cfg)[0]["note"]
+    note = load_items(cfg)[0]["note"]
+    assert "without a RUNNER-OUTCOME" in note and "its last words: I did things." in note
 
 
 def test_work_done_without_changes_is_held(world):
@@ -360,6 +364,7 @@ def test_work_commits_leftover_uncommitted_work(world):
     assert res["status"] == "in_review"
     assert "leftover uncommitted work" in git(world.repo, "log", "-1", "--format=%s", "claude/bl-a")
     assert "worked.txt" in git(world.repo, "diff", "--name-only", "main...claude/bl-a")
+    assert "Leftover uncommitted files were committed as-is (1): worked.txt" in res["note"]
 
 
 def test_work_timeout_kills_session_and_holds(world):

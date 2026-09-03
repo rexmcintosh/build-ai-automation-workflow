@@ -113,6 +113,25 @@ every mergeable branch has a verdict; `approve` is gated to `in_review` (held ne
 `--held`); `repo:` is contained to the projects dir; the deny list covers `git -c …
 push` / `--git-dir` variants (the pushurl guard stays the primary layer); YAML writes fsync.
 
+## Lessons from the first two real runs (2026-09-03)
+
+1. `2026-07-21-venice-keys-polish-followups` → **held**, 4 min, $2.45, 13 turns, 0 denials.
+   The session did the in-repo parts, ran 605 tests, and held the cross-repo remainder with
+   exact operator steps. Council: approve and merge (8/10). It also found that the first
+   push guard (per-remote `pushurl`) broke 11 loom tests that push to a temp `origin` —
+   hence the `pushInsteadOf` guard.
+2. `2026-08-16-math-content-polish` → **in_review**, 16 min, $10.07, 14 turns, 0 denials,
+   but *no outcome block*: the session started a background review and ended its turn to
+   wait for it, which in `-p` mode ends the session. It also left a `.scratch/` directory
+   that the leftover commit swept into the branch (the council flagged it). Council:
+   approve the content, fix the sync tooling before use (7/10). Hence prompt rules 9–11
+   (single foreground pass; the human merge protocol does not apply; scratch in the temp
+   dir), the leftover-files note on the item, and the tolerant outcome parser.
+
+Also observed: a worktree carries no gitignored files, so `.env`/`.dev.vars` secrets are
+simply absent from the session's tree (it can still read `~/.env` — layer 5 forbids it;
+not a sandbox).
+
 ## Morning review
 
 `backlog-run report` numbers the `in_review` items; `approve 1 3`, `drop 2`, `show 1`,
