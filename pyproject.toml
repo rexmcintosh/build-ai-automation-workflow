@@ -3,7 +3,7 @@ name = "council"
 version = "0.5.0"
 description = "Multi-model Venice AI council: ask / review / panels"
 requires-python = ">=3.11"
-dependencies = ["requests>=2.31"]
+dependencies = ["requests>=2.31", "pyyaml>=6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -13,6 +13,7 @@ council = "council.cli:main"
 council-ci-review = "council.ci_review:main"
 diem = "diem.cli:main"
 session-gc = "sessiongc.cli:main"
+backlog-run = "backlogrun.cli:main"
 venice-usage = "venice_usage.cli:main"
 
 [build-system]
@@ -20,7 +21,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["council", "diem", "sessiongc", "venice_usage"]
+packages = ["council", "diem", "sessiongc", "backlogrun", "venice_usage"]
 
 [tool.setuptools.package-data]
 council = ["panels.toml"]
