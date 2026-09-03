@@ -311,7 +311,8 @@ def test_work_held_keeps_branch(world):
     assert res["status"] == "held"
     (it,) = load_items(cfg)
     assert it["status"] == "held" and it["branch"] == "claude/bl-a"
-    assert "HELD" in it["note"] and "council" not in it
+    assert "HELD" in it["note"]
+    assert it["council"].startswith("stub: approve")      # held branches with work are reviewed too
 
 
 def test_work_crash_without_changes_holds_and_deletes_empty_branch(world):
@@ -642,3 +643,38 @@ def test_run_lock_contention_exits_75(world):
             % (str(Path(br.__file__).resolve().parents[1]), cfg.state_dir)],
             capture_output=True, text=True)
     assert p.returncode == br.EX_TEMPFAIL == 75
+
+
+# ----------------------------------------------------------------------------- council round 2 fixes
+
+
+def test_approve_refuses_held_unless_flagged(world):
+    cfg = world.build([item("2026-01-01-a", status="held", branch="claude/bl-a", note="runner: HELD — needs key")])
+    worked_branch(world.repo, "claude/bl-a")
+    msgs = []
+    assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
+    assert "re-run with --held" in msgs[-1]
+    assert git(world.repo, "rev-list", "--count", "origin/main..main").strip() == "0"
+    assert br.approve_one(cfg, "2026-01-01-a", log=msgs.append, allow_held=True)
+    assert br.load_yaml(cfg.archive_path)["items"][0]["status"] == "done"
+
+
+def test_repo_path_is_contained_in_projects(world):
+    cfg = world.build([])
+    assert br.repo_path(cfg, "alpha") == str(world.repo)
+    assert br.repo_path(cfg, str(world.repo)) == str(world.repo)
+    assert br.repo_path(cfg, "../remotes/alpha.git") is None
+    assert br.repo_path(cfg, "/") is None
+    assert br.repo_path(cfg, "none") is None and br.repo_path(cfg, None) is None
+    outside = world.root / "outside"
+    outside.mkdir()
+    git(outside, "init", "-q")
+    assert br.repo_path(cfg, str(outside)) is None
+
+
+def test_deny_rules_cover_push_variants(world):
+    cfg = world.build([])
+    br.write_session_settings(cfg)
+    deny = json.load(open(cfg.settings_path))["permissions"]["deny"]
+    for must in ("Bash(git -c * push*)", "Bash(git -C * push*)", "Bash(git --git-dir* push*)", "Bash(git remote*)"):
+        assert must in deny

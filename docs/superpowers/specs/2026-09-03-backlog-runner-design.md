@@ -103,6 +103,11 @@ per-item try/except so one failure never aborts the batch; bounded by `--max-ite
 - Item ids are validated as safe slugs before becoming branch names or paths.
 - All mutating commands (`work`, `approve`, `drop`, `hold`, `reopen`) take the run lock.
 
+Council round 2 (approve with changes): held branches that carry work are reviewed too, so
+every mergeable branch has a verdict; `approve` is gated to `in_review` (held needs
+`--held`); `repo:` is contained to the projects dir; the deny list covers `git -c …
+push` / `--git-dir` variants (the pushurl guard stays the primary layer); YAML writes fsync.
+
 ## Morning review
 
 `backlog-run report` numbers the `in_review` items; `approve 1 3`, `drop 2`, `show 1`,

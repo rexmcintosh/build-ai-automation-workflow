@@ -78,7 +78,9 @@ STEPS_RE = re.compile(r"RUNNER-OPERATOR-STEPS:\s*(.*?)(?=\n\s*RUNNER-[A-Z-]+:|\n
 # family of outward or irreversible commands. `git push` is ALSO blocked structurally
 # (pushurl guard) — this list is the second layer and covers everything else.
 DENY_RULES = [
-    "Bash(git push*)", "Bash(git -C * push*)", "Bash(git remote*)", "Bash(git -C * remote*)",
+    "Bash(git push*)", "Bash(git -C * push*)", "Bash(git -c * push*)", "Bash(git -C * -c * push*)",
+    "Bash(git --git-dir* push*)", "Bash(git --work-tree* push*)",
+    "Bash(git remote*)", "Bash(git -C * remote*)",
     "Bash(gh pr*)", "Bash(gh release*)", "Bash(gh repo*)", "Bash(gh api*)",
     "Bash(wrangler*)", "Bash(npx wrangler*)", "Bash(pnpm wrangler*)", "Bash(yarn wrangler*)",
     "Bash(npm run deploy*)", "Bash(pnpm run deploy*)", "Bash(pnpm deploy*)", "Bash(yarn deploy*)",
@@ -255,7 +257,17 @@ def write_yaml_atomic(path: str, doc: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
+        try:
+            dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -385,10 +397,15 @@ def _branch_is_empty_and_free(repo: str, branch: str, base: str) -> bool:
 
 
 def repo_path(cfg: Config, repo: str | None) -> str | None:
+    """`repo` -> the main checkout under the projects dir, or None. Contained: the
+    resolved path must live inside the projects dir (no `..`, no absolute escapes)."""
     if not repo or str(repo).strip().lower() in ("none", "null", ""):
         return None
-    repo = str(repo)
-    path = repo if os.path.isabs(repo) else os.path.join(cfg.projects, repo)
+    repo = str(repo).strip()
+    root = os.path.realpath(cfg.projects)
+    path = os.path.realpath(repo if os.path.isabs(repo) else os.path.join(root, repo))
+    if not path.startswith(root + os.sep):
+        return None
     return path if os.path.isdir(os.path.join(path, ".git")) else None
 
 
@@ -775,7 +792,9 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
             else:
                 result.update(status="held", note=f"runner: reported done but produced no changes — {why}{denial_note}{tail}")
 
-        if result["status"] == "in_review":
+        # C3: every branch that carries work is reviewed — held ones too, so a partial
+        # branch you later decide to take has a verdict on record.
+        if result.get("branch"):
             diff_text = git(p.repo, "diff", f"{p.base}...{p.branch}", check=False)
             if reviewer is False:
                 result["council"] = "review skipped (--no-council)"
@@ -1093,13 +1112,17 @@ def _release_branch(cfg: Config, repo: str, branch: str, *, force: bool, action:
     return f"branch kept: git branch {flag} refused"
 
 
-def approve_one(cfg: Config, iid: str, *, log=print) -> bool:
+def approve_one(cfg: Config, iid: str, *, log=print, allow_held: bool = False) -> bool:
     doc = load_yaml(cfg.backlog_path)
     it = find_item(doc, iid)
     if not it:
         log(f"approve {iid}: not an active item"); return False
-    if it.get("status") not in ("in_review", "held") or not it.get("branch"):
-        log(f"approve {iid}: status {it.get('status')} with branch {it.get('branch')!r} — only worked branches can be approved"); return False
+    if not it.get("branch"):
+        log(f"approve {iid}: has no branch to merge"); return False
+    if it.get("status") == "held" and not allow_held:
+        log(f"approve {iid}: is held ({str(it.get('note') or '')[:120]}); read its note and council line, then re-run with --held to merge it anyway"); return False
+    if it.get("status") not in ("in_review", "held"):
+        log(f"approve {iid}: status {it.get('status')} — only in_review items (or held with --held) can be approved"); return False
     rp, br = repo_path(cfg, it.get("repo")), it["branch"]
     if not rp:
         log(f"approve {iid}: repo {it.get('repo')!r} not found"); return False
@@ -1183,7 +1206,7 @@ def cmd_approve(args, cfg: Config) -> int:
                 iid = resolve_ref(cfg, tok)
             except KeyError as e:
                 print(f"approve {tok}: {e}"); ok = False; continue
-            ok = approve_one(cfg, iid) and ok
+            ok = approve_one(cfg, iid, allow_held=args.held) and ok
         write_report(cfg)
     return 0 if ok else 1
 
@@ -1263,7 +1286,9 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("show", help="item details + council review"); sh.add_argument("item"); sh.set_defaults(func=cmd_show)
     df = sub.add_parser("diff", help="full diff of a worked branch"); df.add_argument("item"); df.set_defaults(func=cmd_diff)
     ap = sub.add_parser("approve", help="merge + push + delete branch; archive as done (human command)")
-    ap.add_argument("items", nargs="+", help="report numbers or item ids"); ap.set_defaults(func=cmd_approve)
+    ap.add_argument("items", nargs="+", help="report numbers or item ids")
+    ap.add_argument("--held", action="store_true", help="also allow merging a held item's branch (read its note first)")
+    ap.set_defaults(func=cmd_approve)
     dr = sub.add_parser("drop", help="delete the branch (journaled); archive as dropped")
     dr.add_argument("items", nargs="+", help="report numbers or item ids"); dr.set_defaults(func=cmd_drop)
     ho = sub.add_parser("hold", help="open/in_review -> held with a note")

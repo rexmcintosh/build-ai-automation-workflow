@@ -16,6 +16,7 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
     backlog-run report                   # morning report, numbered
     backlog-run show 1  |  diff 1        # details / full diff (number from the report, or an id)
     backlog-run approve 1 3              # merge --no-ff into main, push, delete branch, archive done
+    backlog-run approve <id> --held      # same for a held item's branch (read its note first)
     backlog-run drop 2                   # delete branch (journaled), archive dropped
     backlog-run hold <id> "why"          # park an item;  backlog-run reopen <id> returns it
     backlog-run list
@@ -41,8 +42,11 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
   `runner: CONFLICT …` note (the branch is kept).
 - An empty leftover `claude/bl-*` branch (no commits, no worktree) is reclaimed on the next
   run, journaled; a leftover branch **with** work holds the item instead.
-- A council failure is recorded as the verdict (`REVIEW FAILED: …`); the item still goes to
-  `in_review` — the morning report shows it, you review by hand.
+- Every branch that carries work is council-reviewed — held ones too. A council failure is
+  recorded as the verdict (`REVIEW FAILED: …`); the item still goes to `in_review` — the
+  morning report shows it, you review by hand.
+- `approve` takes `in_review` items; a held item's branch needs `--held`.
+- `repo:` must resolve inside `~/projects` (no `..`, no absolute escapes) or the item is held.
 - `approve` records the merge in the backlog **before** deleting the branch and is safe to
   re-run (an already-merged branch is not merged twice). `drop` records before deleting.
 - An archive move writes `archive.yaml` first; an id found in both files is reconciled in
