@@ -63,6 +63,41 @@ WIP_PREFIX = "refs/wip/"
 GRACE_SECONDS = 60 * 60           # I5: don't touch branches younger than 1h
 TIER_B_MIN_AGE = 14 * 24 * 3600   # content-merged auto-delete only past 14 days
 WIP_EXPIRE_SECONDS = 30 * 24 * 3600
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+def _send_telegram(chat_id: str, message: str) -> bool:
+    """Send one plain-text Telegram message through the configured tg-send."""
+    sender = os.environ.get("SESSION_GC_TG_SEND") or shutil.which("tg-send")
+    if not sender:
+        print("session-gc: tg-send not found; skipping Telegram notification",
+              file=sys.stderr)
+        return False
+    p = subprocess.run(
+        [sender, chat_id, "-"],
+        input=message, capture_output=True, text=True, timeout=30,
+    )
+    if p.returncode != 0:
+        detail = p.stderr.strip() or f"exit status {p.returncode}"
+        raise RuntimeError(detail)
+    return True
+
+
+def _telegram_chunks(entries: list[str]) -> list[str]:
+    """Join entries into Telegram-sized messages, preferring line boundaries."""
+    remaining = "\n".join(entries)
+    chunks = []
+    while len(remaining) > TELEGRAM_MESSAGE_LIMIT:
+        split = remaining.rfind("\n", 0, TELEGRAM_MESSAGE_LIMIT + 1)
+        if split <= 0:
+            split = TELEGRAM_MESSAGE_LIMIT
+        chunks.append(remaining[:split])
+        remaining = remaining[split:]
+        if remaining.startswith("\n"):
+            remaining = remaining[1:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
 
 # ----------------------------------------------------------------------------- git helpers
 
@@ -424,7 +459,7 @@ def cmd_sweep(args) -> int:
                         lines.append(f"- `{b}` — safe-delete candidate (Tier B, content-merged){gate}")
                 else:  # Tier C — I8: report only, always
                     totals["C"] += 1
-                    stranded.append((name, b, sha))
+                    stranded.append((repo, name, b, sha))
                     lines.append(f"- `{b}` — **STRANDED WIP** (Tier C, unmerged; kept)")
             if lines:
                 report.append(f"## {name}")
@@ -444,6 +479,38 @@ def cmd_sweep(args) -> int:
         if stranded:
             print(f"\nsession-gc: {len(stranded)} stranded WIP branch(es) need attention "
                   f"(see {REPORT_PATH})", file=sys.stderr)
+            notify_strict = getattr(args, "notify_strict", False)
+            if args.notify or notify_strict:
+                delivery_failed = False
+                chat_id = os.environ.get("SESSION_GC_TG_CHAT_ID")
+                if not chat_id:
+                    print("--notify: SESSION_GC_TG_CHAT_ID not set; skipping send",
+                          file=sys.stderr)
+                    delivery_failed = True
+                else:
+                    entries = []
+                    for repo, name, branch, sha in stranded:
+                        try:
+                            subject = git(
+                                repo, "show", "-s", "--format=%s", sha,
+                            ).strip()
+                        except GitError:
+                            subject = ""
+                        entries.append(
+                            f"{name} {branch}: {subject or sha[:12]}"
+                        )
+                    sender = getattr(args, "_sender", None) or _send_telegram
+                    for message in _telegram_chunks(entries):
+                        try:
+                            if sender(chat_id, message) is False:
+                                delivery_failed = True
+                                break
+                        except Exception as e:
+                            delivery_failed = True
+                            print(f"session-gc: Telegram notification failed: {e}",
+                                  file=sys.stderr)
+                if notify_strict and delivery_failed:
+                    return 1
         return 0
 
 
@@ -517,6 +584,10 @@ def main(argv=None) -> int:
     sw.add_argument("--delete-tier-b", action="store_true",
                     help="also delete content-merged (Tier B) branches older than 14d")
     sw.add_argument("--repo", help="limit to a single repo (dir name)")
+    sw.add_argument("--notify", action="store_true",
+                    help="notify Telegram when Tier C stranded WIP is found")
+    sw.add_argument("--notify-strict", action="store_true",
+                    help="notify Telegram and return non-zero if delivery fails")
     sw.set_defaults(func=cmd_sweep)
 
     rp = sub.add_parser("report", help="print the latest sweep report")
