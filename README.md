@@ -34,6 +34,9 @@ The dev infrastructure model: **Claude Code runs on a Hetzner VPS → opens PRs 
 - [`bebop/`](bebop/README.md) — personal assistant: twice-daily Gmail+Calendar briefing.
 - [`loom/`](loom/README.md) — session-learning pipeline: distills transcripts into woven
   learnings.
+- [`backlogrun/`](backlogrun/README.md) — the 3am backlog runner: works `~/projects/backlog`
+  items unattended on isolated branches, council-reviews them, and leaves a morning
+  report; `approve`/`drop` are the human half.
 
 > watchdog, `council compare`/`sweep`, and fixit were distilled from Naval's
 > *AI Industrial Revolution* podcast — see
