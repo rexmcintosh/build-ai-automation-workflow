@@ -12,9 +12,19 @@ Two jobs:
 """
 from __future__ import annotations
 
+import heapq
+import json
+import logging
 import re
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISREG
 from typing import Dict, List
+
+from .state import state_lock
+
+logger = logging.getLogger(__name__)
 
 # Words too common to carry meaning when comparing two learnings.
 _STOP = set("the a an of to in is are and or for on with that this it be as by from "
@@ -90,8 +100,118 @@ def _learning_block(learnings_dir: Path, lid: str) -> str:
         return ""
 
 
+def _quarantined_sessions(loom_dir: Path, limit: int = 10) -> dict:
+    """Summarize terminal session quarantines without reading transcript content."""
+    loom_dir = Path(loom_dir)
+    limit = max(0, int(limit))
+    state_path = loom_dir / "state.json"
+    degraded = False
+    error = None
+
+    with state_lock(state_path):
+        try:
+            state = json.loads(state_path.read_text() or "{}")
+        except FileNotFoundError:
+            state = {}
+        except OSError as exc:
+            error = f"could not read state.json: {exc}"
+            logger.warning("%s", error)
+            state = {}
+            degraded = True
+        except ValueError as exc:
+            error = f"invalid state.json: {exc}"
+            logger.warning("%s", error)
+            state = {}
+            degraded = True
+        if not isinstance(state, dict):
+            error = "invalid state.json: top-level value is not an object"
+            logger.warning("%s", error)
+            state = {}
+            degraded = True
+
+        quarantined = {}
+        reasons = Counter()
+        for sid, entry in state.items():
+            if (not isinstance(sid, str) or not isinstance(entry, dict)
+                    or entry.get("state") != "quarantined"):
+                continue
+
+            quarantined[sid] = entry
+            detector = entry.get("quarantine_detector") or entry.get("detector") or "unknown"
+            if not isinstance(detector, str) or not detector.strip():
+                detector = "unknown"
+            reasons[detector.strip()] += 1
+
+        # Snapshot and stat the quarantine directory while holding the same read
+        # lock as state.json. Only an exact <session_id>.jsonl name is canonical.
+        transcript_stats = {}
+        quarantine_dir = loom_dir / "quarantine"
+        try:
+            transcripts = list(quarantine_dir.iterdir())
+            for transcript in transcripts:
+                try:
+                    stat = transcript.stat()
+                except OSError:
+                    continue
+                if not S_ISREG(stat.st_mode):
+                    continue
+
+                name = transcript.name
+                if not name.endswith(".jsonl"):
+                    continue
+                sid = name[:-len(".jsonl")]
+                if sid in quarantined:
+                    transcript_stats[sid] = stat
+        except OSError:
+            pass
+
+    def quarantine_datetime(entry):
+        value = entry.get("quarantined_at")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    def session_summary(sid):
+        stat = transcript_stats.get(sid)
+        quarantined_at = quarantine_datetime(quarantined[sid])
+        observed_at = quarantined_at or (
+            datetime.fromtimestamp(stat.st_mtime, timezone.utc) if stat else None
+        )
+        return {
+            "id": sid,
+            "quarantined_on": observed_at.date().isoformat() if observed_at else None,
+            "size_bytes": stat.st_size if stat else None,
+            "_recency": observed_at.timestamp() if observed_at else 0,
+        }
+
+    recent_ranked = heapq.nlargest(
+        limit,
+        (session_summary(sid) for sid in quarantined),
+        key=lambda item: (item["_recency"], item["id"]),
+    )
+    recent = [{k: v for k, v in item.items() if k != "_recency"}
+              for item in recent_ranked]
+    histogram = dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0])))
+    payload = {
+        "count": len(quarantined),
+        "reasons": histogram,
+        "recent": recent,
+        "action": "Run `loom resolve <id>` to review and resolve one.",
+        "degraded": degraded,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
 def pending_summary(*, wiki_root, ledger_path, learnings_dir, loom_dir,
-                    today=None, promote_target=None) -> dict:
+                    today=None, promote_target=None, quarantined_limit=10) -> dict:
     """Everything waiting on a human, in one payload. Shared by the briefing line
     and the review page so the two can never disagree about what's pending.
 
@@ -141,6 +261,8 @@ def pending_summary(*, wiki_root, ledger_path, learnings_dir, loom_dir,
         "held": is_held(loom_dir, target),
         "staged_claude": check["staged"],
         "would_promote": check["go"],
+        "quarantined_sessions": _quarantined_sessions(
+            Path(loom_dir), limit=quarantined_limit),
     }
 
 
@@ -156,6 +278,9 @@ def briefing_line(payload: dict, url: str = "") -> str:
     landed = promo.get("articles") or []
     decisions = payload.get("decisions") or []
     staged = payload.get("staged_claude") or []
+    quarantined = payload.get("quarantined_sessions") or {}
+    quarantined_count = quarantined.get("count", 0)
+    quarantine_degraded = quarantined.get("degraded", False)
     held = payload.get("held")
 
     n = len(landed)
@@ -167,7 +292,7 @@ def briefing_line(payload: dict, url: str = "") -> str:
         head = f"{n} {noun} waiting — a memory/skill change needs you first"
     elif promo.get("promoted") and n:
         head = f"{n} {noun} landed in your wiki"
-    elif decisions:
+    elif decisions or quarantined_count or quarantine_degraded:
         head = "nothing landed"
     else:
         return ""                      # nothing happened and nothing is asked
@@ -177,6 +302,12 @@ def briefing_line(payload: dict, url: str = "") -> str:
         names = " · ".join(d.get("subject", "?") for d in decisions[:3])
         more = f" +{len(decisions) - 3}" if len(decisions) > 3 else ""
         parts.append(f"   {len(decisions)} need your call: {names}{more}")
+    if quarantine_degraded:
+        parts.append(
+            f"   quarantine summary degraded: {quarantined.get('error', 'unknown error')}")
+    elif quarantined_count:
+        noun = "session" if quarantined_count == 1 else "sessions"
+        parts.append(f"   {quarantined_count} quarantined {noun} need review")
     if url:
         parts.append(f"   {url}")
     return "\n".join(parts)

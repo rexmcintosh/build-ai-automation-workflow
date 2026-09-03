@@ -64,9 +64,13 @@ def test_empty_input_is_no_decisions():
 
 # --- pending_summary: the one payload the briefing line and review page share ---
 import json as _json
+import os
 import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
-from loom.pending import pending_summary
+from loom.pending import _quarantined_sessions, pending_summary
 
 
 def _git(root, *a):
@@ -112,6 +116,220 @@ def test_pending_summary_surfaces_decisions_not_raw_rows(wiki, tmp_path):
     assert s["decisions"][0]["n"] == 2
 
 
+def test_pending_summary_surfaces_quarantined_sessions(wiki, tmp_path):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+
+    state = {}
+    for day in range(1, 12):
+        sid = f"session-{day:02d}"
+        state[sid] = {"state": "quarantined"}
+        transcript = quarantine / f"{sid}.jsonl"
+        transcript.write_bytes(b"x" * day)
+        timestamp = datetime(2026, 7, day, tzinfo=timezone.utc).timestamp()
+        os.utime(transcript, (timestamp, timestamp))
+    (loom / "state.json").write_text(_json.dumps(state))
+
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21")
+    quarantined = s["quarantined_sessions"]
+
+    assert quarantined["count"] == 11
+    assert quarantined["reasons"] == {"unknown": 11}
+    assert len(quarantined["recent"]) == 10
+    assert quarantined["recent"][0] == {
+        "id": "session-11",
+        "quarantined_on": "2026-07-11",
+        "size_bytes": 11,
+    }
+    assert "loom resolve <id>" in quarantined["action"]
+
+
+def test_pending_summary_prefers_quarantined_at_for_date_and_recency(wiki, tmp_path):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+    older = quarantine / "session-older.jsonl"
+    newer = quarantine / "session-newer.jsonl"
+    older.write_text("old")
+    newer.write_text("new")
+    newer_mtime = datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp()
+    older_mtime = datetime(2026, 7, 31, tzinfo=timezone.utc).timestamp()
+    os.utime(older, (older_mtime, older_mtime))
+    os.utime(newer, (newer_mtime, newer_mtime))
+    (loom / "state.json").write_text(_json.dumps({
+        "session-older": {
+            "state": "quarantined",
+            "quarantined_at": "2026-07-10T12:00:00+00:00",
+        },
+        "session-newer": {
+            "state": "quarantined",
+            "quarantined_at": "2026-07-20T12:00:00+00:00",
+        },
+    }))
+
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21")
+
+    assert [item["id"] for item in s["quarantined_sessions"]["recent"]] == [
+        "session-newer", "session-older",
+    ]
+    assert [item["quarantined_on"] for item in
+            s["quarantined_sessions"]["recent"]] == ["2026-07-20", "2026-07-10"]
+
+
+def test_pending_summary_uses_only_exact_transcript_name(wiki, tmp_path):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+    (quarantine / "session-01.backup.jsonl").write_text("sidecar")
+    (loom / "state.json").write_text(_json.dumps({
+        "session-01": {"state": "quarantined"},
+    }))
+
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21")
+
+    assert s["quarantined_sessions"]["recent"] == [{
+        "id": "session-01",
+        "quarantined_on": None,
+        "size_bytes": None,
+    }]
+
+
+def test_pending_summary_skips_transcript_that_vanishes_during_stat(
+        wiki, tmp_path, monkeypatch):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+    transcript = quarantine / "session-01.jsonl"
+    transcript.write_text("transcript")
+    (loom / "state.json").write_text(_json.dumps({
+        "session-01": {"state": "quarantined"},
+    }))
+
+    real_stat = Path.stat
+
+    def disappearing_stat(path, *args, **kwargs):
+        if path == transcript:
+            raise FileNotFoundError(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", disappearing_stat)
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21")
+
+    assert s["quarantined_sessions"]["count"] == 1
+    assert s["quarantined_sessions"]["recent"] == [{
+        "id": "session-01",
+        "quarantined_on": None,
+        "size_bytes": None,
+    }]
+
+
+def test_pending_summary_lists_quarantine_directory_once(wiki, tmp_path, monkeypatch):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+    (quarantine / "session-01.jsonl").write_text("transcript")
+    (loom / "state.json").write_text(_json.dumps({
+        "session-01": {"state": "quarantined"},
+    }))
+
+    real_iterdir = Path.iterdir
+    listings = 0
+
+    def counted_iterdir(path):
+        nonlocal listings
+        if path == quarantine:
+            listings += 1
+        return real_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", counted_iterdir)
+    pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                    learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                    today="2026-07-21")
+
+    assert listings == 1
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_pending_summary_clamps_non_positive_quarantine_limit(wiki, tmp_path, limit):
+    loom = tmp_path / "loom"
+    quarantine = loom / "quarantine"
+    quarantine.mkdir(parents=True)
+    (quarantine / "session-01.jsonl").write_text("transcript")
+    (loom / "state.json").write_text(_json.dumps({
+        "session-01": {"state": "quarantined"},
+    }))
+
+    s = pending_summary(wiki_root=wiki, ledger_path=tmp_path / "l.json",
+                        learnings_dir=tmp_path / "learnings", loom_dir=loom,
+                        today="2026-07-21", quarantined_limit=limit)
+
+    assert s["quarantined_sessions"]["count"] == 1
+    assert s["quarantined_sessions"]["recent"] == []
+
+
+def test_invalid_state_degrades_quarantine_summary_and_briefing(tmp_path):
+    loom = tmp_path / "loom"
+    loom.mkdir()
+    (loom / "state.json").write_text("{invalid")
+
+    quarantined = _quarantined_sessions(loom)
+
+    assert quarantined["degraded"] is True
+    assert quarantined["count"] == 0
+    assert quarantined["error"].startswith("invalid state.json:")
+    line = briefing_line({
+        "promoted": {"promoted": False, "articles": []},
+        "decisions": [], "held": False, "staged_claude": [],
+        "quarantined_sessions": quarantined,
+    })
+    assert f"quarantine summary degraded: {quarantined['error']}" in line
+    assert "0 quarantined" not in line
+
+
+def test_unreadable_state_degrades_quarantine_summary(tmp_path, monkeypatch):
+    loom = tmp_path / "loom"
+    loom.mkdir()
+    state_path = loom / "state.json"
+    state_path.write_text("{}")
+    real_read_text = Path.read_text
+
+    def unreadable_state(path, *args, **kwargs):
+        if path == state_path:
+            raise PermissionError("denied")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_state)
+    quarantined = _quarantined_sessions(loom)
+
+    assert quarantined["degraded"] is True
+    assert quarantined["error"] == "could not read state.json: denied"
+
+
+def test_quarantined_at_is_persisted_once(tmp_path):
+    from loom.state import LoomState
+
+    path = tmp_path / "loom" / "state.json"
+    state = LoomState(path)
+    state.advance("session-01", "quarantined")
+    first = _json.loads(path.read_text())["session-01"]["quarantined_at"]
+
+    parsed = datetime.fromisoformat(first)
+    assert parsed.utcoffset().total_seconds() == 0
+
+    state.advance("session-01", "quarantined")
+    second = _json.loads(path.read_text())["session-01"]["quarantined_at"]
+    assert second == first
+
+
 def test_pending_summary_reports_hold_state(wiki, tmp_path):
     """`held` describes the NEXT promote (the run a veto targets), not the
     calling day — a hold set at 07:00 must show as held all day."""
@@ -141,6 +359,15 @@ def test_silent_when_nothing_needs_him():
     became wallpaper; if there's nothing to say, say nothing."""
     assert briefing_line({"promoted": {"promoted": False, "articles": []},
                           "decisions": [], "held": False, "staged_claude": []}) == ""
+
+
+def test_quarantined_sessions_reach_the_briefing():
+    line = briefing_line({
+        "promoted": {"promoted": False, "articles": []},
+        "decisions": [], "held": False, "staged_claude": [],
+        "quarantined_sessions": {"count": 13},
+    })
+    assert "13 quarantined sessions" in line
 
 
 def test_reports_what_landed_overnight():
