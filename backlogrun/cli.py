@@ -1298,6 +1298,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # cron/log friendliness: progress lines land in cron.log as they happen, not at exit
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
     args = build_parser().parse_args(argv)
     cfg = Config()
     if args.cmd == "work":
