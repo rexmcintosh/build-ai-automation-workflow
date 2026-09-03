@@ -78,8 +78,12 @@ show / diff / list / hold / reopen
      added later, is rewritten to a path that does not exist and fails; fetches keep the
      real URL; local-path remotes (test suites' temp repos) still work. Command-line-level
      config, so no config file can undo it; a `git -c remote.X.pushurl=…` could, which the
-     deny rules cover. (First cut overrode each remote's `pushurl`; the real run showed it
-     also broke 11 loom tests that push to a temp `origin`.)
+     deny rules cover. Plus `remote.<name>.pushurl=<dead-path>` for each of the repo's own
+     non-local remotes (any URL form, e.g. `deploy@host:…`). Local-path remotes are left
+     alone on purpose (test suites push to temp repos); accepted risk: a repo with a
+     filesystem remote could be pushed to — none exist under `~/projects` (checked
+     2026-09-03; all are github https/ssh). (First cut overrode every remote's `pushurl`;
+     the real run showed it broke 11 loom tests that push to a temp `origin`.)
   3. `--settings` deny rules (push, remote, gh pr/release, wrangler, deploy scripts, netlify,
      vercel, supabase, stripe, curl/wget/ssh/scp/rsync, crontab, systemctl, sudo, docker,
      tg-send, mail, pipx) — enforced even under `--dangerously-skip-permissions`;

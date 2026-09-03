@@ -230,6 +230,7 @@ def test_mutate_backlog_rereads_before_writing(world):
     ("RUNNER-OUTCOME: `held`\nRUNNER-SUMMARY: needs a key\n  second line\nRUNNER-OPERATOR-STEPS: add KEY to ~/.env", "held", "needs a key second line"),
     ("first RUNNER-OUTCOME: failed\n later RUNNER-OUTCOME: done\nRUNNER-SUMMARY: ok", "done", "ok"),
     ("no block here", "", ""),
+    ("the RUNNER-OUTCOME line should say done", "", ""),
     ("**RUNNER-OUTCOME:** done\n**RUNNER-SUMMARY:** bold summary\n**RUNNER-OPERATOR-STEPS:** none", "done", "bold summary"),
     ("RUNNER-OUTCOME: `held`\nRUNNER-SUMMARY: *needs key*", "held", "needs key"),
 ])
@@ -248,12 +249,33 @@ def test_scrubbed_env_has_no_secrets_and_disables_push(world):
     env = br.scrubbed_env(str(world.repo), ["/opt/node/bin"])
     assert "VENICE_API_KEY" not in env and "STRIPE_SECRET_KEY" not in env
     assert not any(k.startswith("CLAUDE") for k in env)
-    assert env["GIT_CONFIG_COUNT"] == str(len(br.NO_PUSH_SCHEMES))
+    n = len(br.NO_PUSH_SCHEMES)
+    assert env["GIT_CONFIG_COUNT"] == str(n + 1)           # schemes + the one real remote (hub); origin is local
     assert env["GIT_CONFIG_KEY_0"] == f"url.{br.NO_PUSH_BASE}.pushInsteadOf"
-    assert {env[f"GIT_CONFIG_VALUE_{i}"] for i in range(len(br.NO_PUSH_SCHEMES))} == set(br.NO_PUSH_SCHEMES)
+    assert {env[f"GIT_CONFIG_VALUE_{i}"] for i in range(n)} == set(br.NO_PUSH_SCHEMES)
+    assert env[f"GIT_CONFIG_KEY_{n}"] == "remote.hub.pushurl" and env[f"GIT_CONFIG_VALUE_{n}"].startswith("/nonexistent")
+    assert "remote.origin.pushurl" not in env.values()
     assert env["PATH"].startswith("/opt/node/bin:")
     assert os.path.join(br.HOME, ".local", "bin") in env["PATH"]
     assert env["BACKLOG_RUN"] == "1" and env["TERM"] == "dumb"
+
+
+@pytest.mark.parametrize("url,local", [
+    ("/tmp/x.git", True), ("../remotes/x.git", True), ("./x", True), ("file:///tmp/x.git", True), ("~/x.git", True),
+    ("https://github.com/a/b.git", False), ("HTTPS://github.com/a/b.git", False), ("git@github.com:a/b.git", False),
+    ("deploy@host.example:repos/b.git", False), ("ssh://git@host/a/b.git", False), ("host:repos/b.git", False),
+])
+def test_is_local_remote(url, local):
+    assert br._is_local_remote(url) is local
+
+
+def test_scp_style_remote_gets_pushurl_override(world):
+    git(world.repo, "remote", "add", "deploy", "deploy@host.example:repos/alpha.git")
+    env = br.scrubbed_env(str(world.repo))
+    keys = {env[k]: env["GIT_CONFIG_VALUE_" + k.split("_")[-1]] for k in env if k.startswith("GIT_CONFIG_KEY_")}
+    assert keys["remote.deploy.pushurl"].startswith("/nonexistent")
+    assert keys["remote.hub.pushurl"].startswith("/nonexistent")
+    assert "remote.origin.pushurl" not in keys
 
 
 def test_session_settings_deny_rules(world):

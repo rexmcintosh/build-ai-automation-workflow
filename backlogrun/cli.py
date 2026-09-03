@@ -70,7 +70,7 @@ TG_CHAT_DEFAULT = "7735693897"
 USAGE_LIMIT_RE = re.compile(r"hit your session limit|usage limit|limit reached|rate limit",
                             re.IGNORECASE)
 # Tolerant of markdown dress-up: `**RUNNER-OUTCOME:** done`, `RUNNER-OUTCOME: \`held\``, etc.
-OUTCOME_RE = re.compile(r"RUNNER-OUTCOME\**:?\**\s*[`*_]*(done|held|failed)", re.IGNORECASE)
+OUTCOME_RE = re.compile(r"RUNNER-OUTCOME\**:\**\s*[`*_]*(done|held|failed)", re.IGNORECASE)
 SUMMARY_RE = re.compile(r"RUNNER-SUMMARY\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\Z)", re.IGNORECASE | re.DOTALL)
 STEPS_RE = re.compile(r"RUNNER-OPERATOR-STEPS\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\n\s*```|\Z)",
                       re.IGNORECASE | re.DOTALL)
@@ -476,19 +476,28 @@ def plan(cfg: Config, items: list[dict], *, only: list[str] | None = None,
 
 
 NO_PUSH_BASE = "/nonexistent/backlog-run-no-push/"
-# Every scheme a real remote uses. Local-path remotes (temp repos in test suites) are
+# Every scheme a real remote uses (git matches insteadOf prefixes case-sensitively, so the
+# upper-case spellings are listed too). Local-path remotes (temp repos in test suites) are
 # deliberately NOT rewritten, so `git push` to a tmp bare repo inside a test still works.
-NO_PUSH_SCHEMES = ("https://", "http://", "git@", "ssh://", "git://")
+NO_PUSH_SCHEMES = ("https://", "http://", "git@", "ssh://", "git://",
+                   "HTTPS://", "HTTP://", "GIT@", "SSH://", "GIT://")
+
+
+def _is_local_remote(url: str) -> bool:
+    u = url.strip()
+    return u.startswith(("/", "./", "../", "~", "file://")) or (os.sep in u and "://" not in u and "@" not in u and ":" not in u.split(os.sep)[0])
 
 
 def scrubbed_env(repo: str, extra_path: list[str] | None = None) -> dict:
     """C2(a)+(b): a whitelist environment for the session. No secrets from the
-    parent (no *_KEY, *TOKEN*, CLAUDE*), and `url.<dead-path>.pushInsteadOf` for every
-    real URL scheme — so a push to any https/ssh/git remote, whatever its name and even
-    one added later, is rewritten to a path that does not exist and fails. Fetches keep
-    the real URL. GIT_CONFIG_* is command-line-level config, so no config FILE can undo
-    it (a `git -c remote.X.pushurl=…` could — that is what the deny rules are for;
-    verified 2026-09-03)."""
+    parent (no *_KEY, *TOKEN*, CLAUDE*), and git pushes to real remotes disabled two
+    ways: `url.<dead-path>.pushInsteadOf` for every real URL scheme (covers remotes added
+    later) plus `remote.<name>.pushurl=<dead-path>` for each of the repo's own non-local
+    remotes (covers any URL form). Fetches keep the real URL. Local-path remotes are left
+    alone on purpose (test suites push to temp repos) — accepted risk: a production repo
+    with a filesystem remote could be pushed to; none exist under ~/projects (2026-09-03).
+    GIT_CONFIG_* is command-line-level config, so no config FILE can undo it (a
+    `git -c remote.X.pushurl=…` could — that is what the deny rules are for)."""
     env = {
         "HOME": HOME, "USER": os.environ.get("USER", "dev"), "LOGNAME": os.environ.get("LOGNAME", os.environ.get("USER", "dev")),
         "LANG": os.environ.get("LANG", "C.UTF-8"), "LC_ALL": os.environ.get("LC_ALL", ""), "TERM": "dumb",
@@ -501,10 +510,17 @@ def scrubbed_env(repo: str, extra_path: list[str] | None = None) -> dict:
         if p not in parts:
             parts.append(p)
     env["PATH"] = ":".join(parts)
-    for n, scheme in enumerate(NO_PUSH_SCHEMES):
-        env[f"GIT_CONFIG_KEY_{n}"] = f"url.{NO_PUSH_BASE}.pushInsteadOf"
-        env[f"GIT_CONFIG_VALUE_{n}"] = scheme
-    env["GIT_CONFIG_COUNT"] = str(len(NO_PUSH_SCHEMES))
+    entries: list[tuple[str, str]] = [(f"url.{NO_PUSH_BASE}.pushInsteadOf", scheme) for scheme in NO_PUSH_SCHEMES]
+    # Belt and braces for the repo's OWN real remotes, whatever their URL form (covers
+    # scp-style `user@host:path` that is not literally git@): pushurl -> dead path.
+    for name in git(repo, "remote", check=False).split():
+        url = git(repo, "remote", "get-url", name, check=False).strip()
+        if url and not _is_local_remote(url):
+            entries.append((f"remote.{name}.pushurl", NO_PUSH_BASE.rstrip("/")))
+    for n, (k, v) in enumerate(entries):
+        env[f"GIT_CONFIG_KEY_{n}"] = k
+        env[f"GIT_CONFIG_VALUE_{n}"] = v
+    env["GIT_CONFIG_COUNT"] = str(len(entries))
     return env
 
 
