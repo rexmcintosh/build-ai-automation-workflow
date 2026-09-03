@@ -172,8 +172,13 @@ def today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+EX_TEMPFAIL = 75
+
+
 class RunLock:
-    """One `work`/`approve`/`drop` at a time (flock on the state dir)."""
+    """One mutating command (`work`/`approve`/`drop`/`hold`/`reopen`) at a time — flock on
+    the state dir. Contention exits 75 (EX_TEMPFAIL) so a skipped nightly run is visible
+    in cron.log as a failure, not a silent success."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -184,8 +189,8 @@ class RunLock:
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("backlog-run: another run holds the lock; exiting.", file=sys.stderr)
-            sys.exit(0)
+            print("backlog-run: another run holds the lock; exiting (75).", file=sys.stderr)
+            sys.exit(EX_TEMPFAIL)
         return self
 
     def __exit__(self, *exc):
@@ -229,11 +234,22 @@ def load_yaml(path: str) -> dict:
     return doc
 
 
+def _canon(obj):
+    """What `dump_yaml` will actually preserve: multi-line strings lose trailing spaces."""
+    if isinstance(obj, dict):
+        return {k: _canon(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_canon(v) for v in obj]
+    if isinstance(obj, str) and "\n" in obj:
+        return "\n".join(ln.rstrip() for ln in obj.split("\n"))
+    return obj
+
+
 def write_yaml_atomic(path: str, doc: dict) -> None:
-    """Dump to a sibling temp file, prove it parses back, then rename over the target."""
+    """Dump to a sibling temp file, prove it parses back to the same data, then rename
+    over the target."""
     text = dump_yaml(doc)
-    reparsed = yaml.safe_load(text)
-    if not isinstance(reparsed, dict) or len(reparsed.get("items") or []) != len(doc.get("items") or []):
+    if yaml.safe_load(text) != _canon(doc):
         raise ValueError(f"refusing to write {path}: dump does not round-trip")
     fd, tmp = tempfile.mkstemp(prefix=".backlog-run-", suffix=".tmp", dir=os.path.dirname(path) or ".")
     try:
@@ -283,11 +299,25 @@ def find_item(doc: dict, item_id: str) -> dict | None:
     return None
 
 
+def _reconcile(doc: dict, arch: dict) -> list[str]:
+    """An archive move is two file writes (archive first). If a crash landed between
+    them, an id is in both files; the archive wins. Returns the ids it removed."""
+    archived = {it.get("id") for it in arch.get("items", [])}
+    dupes = [it.get("id") for it in doc.get("items", []) if it.get("id") in archived]
+    if dupes:
+        doc["items"] = [it for it in doc["items"] if it.get("id") not in archived]
+    return dupes
+
+
 def mutate_backlog(cfg: Config, item_id: str, fn, *, archive_as: str | None = None) -> dict:
     """Lock -> re-read -> apply fn(item) -> (optionally move to archive) -> atomic write.
-    Returns the updated item. The re-read is the point: never write from a stale copy."""
+    Returns the updated item. The re-read is the point: never write from a stale copy.
+    fn may raise to abort (nothing is written)."""
     with BacklogLock(cfg.backlog_path):
         doc = load_yaml(cfg.backlog_path)
+        arch = load_yaml(cfg.archive_path)
+        for dupe in _reconcile(doc, arch):
+            print(f"backlog-run: {dupe} was in both files (interrupted archive move); archive wins", file=sys.stderr)
         item = find_item(doc, item_id)
         if item is None:
             raise KeyError(f"item {item_id} not found in {cfg.backlog_path}")
@@ -295,9 +325,8 @@ def mutate_backlog(cfg: Config, item_id: str, fn, *, archive_as: str | None = No
         if archive_as:
             item["status"] = archive_as
             doc["items"] = [it for it in doc["items"] if it.get("id") != item_id]
-            arch = load_yaml(cfg.archive_path)
             arch["items"].append(item)
-            write_yaml_atomic(cfg.archive_path, arch)
+            write_yaml_atomic(cfg.archive_path, arch)   # archive first: a crash here duplicates, never loses
         write_yaml_atomic(cfg.backlog_path, doc)
         return item
 
@@ -328,12 +357,31 @@ def backlog_commit(cfg: Config, message: str, *, push: bool = False) -> str:
 # ----------------------------------------------------------------------------- items / plan
 
 
+SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
+
+
 def slug_of(item_id: str) -> str:
     return re.sub(r"^\d{4}-\d{2}-\d{2}-", "", item_id) or item_id
 
 
+def safe_slug(item_id: str) -> bool:
+    """Ids come from a trusted file, but they become branch names and paths: allow only
+    a plain slug (no slashes, dots-only segments, `..`, leading `-`, spaces)."""
+    s = slug_of(str(item_id))
+    return bool(SAFE_SLUG_RE.match(s)) and ".." not in s and not s.endswith(".lock")
+
+
 def branch_for(item_id: str) -> str:
     return BRANCH_PREFIX + slug_of(item_id)
+
+
+def _branch_is_empty_and_free(repo: str, branch: str, base: str) -> bool:
+    """A leftover claude/bl-* branch with no commits beyond base and no worktree holds
+    no work — it may be reclaimed (deleted, journaled) instead of blocking the item."""
+    if any(wt.get("branch") == branch for wt in parse_worktrees(repo)):
+        return False
+    ahead = git(repo, "rev-list", "--count", f"{base}..{branch}", check=False).strip()
+    return ahead == "0"
 
 
 def repo_path(cfg: Config, repo: str | None) -> str | None:
@@ -353,6 +401,7 @@ class Planned:
     branch: str = ""
     worktree: str = ""
     base: str = ""
+    reclaim: bool = False  # work, but first delete an empty leftover branch of the same name
 
 
 def plan(cfg: Config, items: list[dict], *, only: list[str] | None = None,
@@ -372,28 +421,36 @@ def plan(cfg: Config, items: list[dict], *, only: list[str] | None = None,
     worked = 0
     for it in opens:
         iid = str(it.get("id"))
+        if not safe_slug(iid):
+            out.append(Planned(it, "hold", f"id {iid!r} is not a safe slug for a branch/path; rename it"))
+            continue
         rp = repo_path(cfg, it.get("repo"))
         if rp is None:
             out.append(Planned(it, "hold", f"no target repo directory for repo: {it.get('repo')!r}; needs you"))
             continue
         branch = branch_for(iid)
         wt = os.path.join(rp, WORKTREE_DIRNAME, branch[len("claude/"):])
-        if git_ok(rp, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
-            out.append(Planned(it, "hold", f"branch {branch} already exists in {os.path.basename(rp)} (earlier attempt?)",
-                               repo=rp, branch=branch))
-            continue
-        if os.path.exists(wt):
-            out.append(Planned(it, "hold", f"worktree path already exists: {wt}", repo=rp, branch=branch, worktree=wt))
-            continue
         base = default_branch_ref(rp)
         if not base or base.startswith("origin/"):
             out.append(Planned(it, "hold", f"cannot resolve a local default branch in {os.path.basename(rp)}", repo=rp))
+            continue
+        reclaim = False
+        if git_ok(rp, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+            if _branch_is_empty_and_free(rp, branch, base):
+                reclaim = True
+            else:
+                out.append(Planned(it, "hold", f"branch {branch} already exists in {os.path.basename(rp)} with work on it (earlier attempt?)",
+                                   repo=rp, branch=branch))
+                continue
+        if os.path.exists(wt) and not reclaim:
+            out.append(Planned(it, "hold", f"worktree path already exists: {wt}", repo=rp, branch=branch, worktree=wt))
             continue
         if worked >= max_items:
             out.append(Planned(it, "defer", f"beyond --max-items {max_items}", repo=rp, branch=branch, worktree=wt, base=base))
             continue
         worked += 1
-        out.append(Planned(it, "work", "", repo=rp, branch=branch, worktree=wt, base=base))
+        out.append(Planned(it, "work", "reclaims an empty leftover branch first" if reclaim else "",
+                           repo=rp, branch=branch, worktree=wt, base=base, reclaim=reclaim))
     return out
 
 
@@ -633,6 +690,11 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
     if not (os.path.exists(cfg.settings_path) and os.path.exists(cfg.mcp_path)):
         write_session_settings(cfg)
     try:
+        git(p.repo, "worktree", "prune", check=False)
+        if p.reclaim:
+            _remove_worktree(p.repo, p.worktree)
+            if not _delete_branch(cfg, p.repo, p.branch, "reclaim-empty"):
+                raise GitError(f"could not reclaim empty leftover branch {p.branch}")
         git(p.repo, "worktree", "add", "-q", "-b", p.branch, p.worktree, p.base)
     except GitError as e:
         result.update(status="held", note=f"runner: could not create worktree/branch: {e}")
@@ -733,17 +795,31 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         if not cfg.keep_worktree:
             _remove_worktree(p.repo, p.worktree)
         if not result["branch"]:
-            _delete_branch(cfg, p.repo, p.branch, "work-empty")
+            if git_ok(p.repo, "show-ref", "--verify", "--quiet", f"refs/heads/{p.branch}") and \
+                    not _delete_branch(cfg, p.repo, p.branch, "work-empty"):
+                # not fatal: plan() reclaims an empty, worktree-less branch next run
+                result["note"] += f" (empty branch {p.branch} could not be deleted; reclaimed next run)"
     _apply(cfg, result)
     return result
 
 
 def _apply(cfg: Config, result: dict) -> None:
-    """C4: write the item's new state (open stays open). Re-reads under the lock."""
+    """C4: write the item's new state (open stays open). Re-reads under the lock, and
+    only transitions an item that is STILL `open` — if a human (or another tool) moved
+    it during the session, their state wins and the run's result is recorded as a
+    conflict note instead."""
     if result["status"] == "open":
         return
 
     def fn(item: dict):
+        current = item.get("status")
+        if current != "open":
+            item["note"] = (f"runner: CONFLICT — the run finished with {result['status']} but the item is "
+                            f"now {current} (changed during the run); left as is."
+                            + (f" Work is on branch {result['branch']}." if result.get("branch") else "")
+                            + f" Run said: {result['note'][:300]}")
+            result["conflict"] = True
+            return
         item["status"] = result["status"]
         if result.get("branch"):
             item["branch"] = result["branch"]
@@ -760,7 +836,8 @@ def _apply(cfg: Config, result: dict) -> None:
     try:
         mutate_backlog(cfg, result["id"], fn)
         br = f" ({result['branch']})" if result.get("branch") else ""
-        result["git"] = backlog_commit(cfg, f"backlog: {result['id']} -> {result['status']}{br}")
+        what = "conflict note" if result.get("conflict") else result["status"]
+        result["git"] = backlog_commit(cfg, f"backlog: {result['id']} -> {what}{br}")
     except Exception as e:  # noqa: BLE001
         result["git"] = f"backlog update failed: {e}"
         print(f"backlog-run: could not update {result['id']}: {e}", file=sys.stderr)
@@ -788,7 +865,8 @@ def cmd_work(args, cfg: Config) -> int:
         for p in planned:
             iid = p.item["id"]
             if p.action == "work":
-                print(f"  WORK  {iid}\n        repo {os.path.basename(p.repo)}  branch {p.branch}  from {p.base}\n        worktree {p.worktree}")
+                extra = f"  ({p.reason})" if p.reason else ""
+                print(f"  WORK  {iid}{extra}\n        repo {os.path.basename(p.repo)}  branch {p.branch}  from {p.base}\n        worktree {p.worktree}")
             elif p.action == "hold":
                 print(f"  HOLD  {iid}  — {p.reason}")
             else:
@@ -1037,27 +1115,39 @@ def approve_one(cfg: Config, iid: str, *, log=print) -> bool:
         log(f"approve {iid}: main checkout of {os.path.basename(rp)} has uncommitted changes; commit or stash first"); return False
     msg = (f"Merge {br}: {it.get('title')}\n\nBacklog item {iid} (worked {it.get('worked')}, approved {today().isoformat()}).\n"
            f"Council: {str(it.get('council') or '')[:500]}\n\nBacklog-Item: {iid}\nBacklog-Branch: {br}\n")
-    try:
-        git(rp, "merge", "--no-ff", "--no-edit", "-m", msg, br)
-    except GitError as e:
-        git(rp, "merge", "--abort", check=False)
-        log(f"approve {iid}: merge failed and was aborted — {e}"); return False
+    # Idempotent: a re-run after a failed push/archive must not merge twice.
+    if git_ok(rp, "merge-base", "--is-ancestor", br, base):
+        merged = "already merged"
+    else:
+        try:
+            git(rp, "merge", "--no-ff", "--no-edit", "-m", msg, br)
+        except GitError as e:
+            git(rp, "merge", "--abort", check=False)
+            log(f"approve {iid}: merge failed and was aborted — {e}"); return False
+        merged = "merged"
     merge_sha = git(rp, "rev-parse", "HEAD").strip()
     pushed = "no remote — local only"
     if git_ok(rp, "remote", "get-url", "origin"):
         if git_ok(rp, "push", "origin", base):
             pushed = f"pushed origin/{base}"
         else:
-            log(f"approve {iid}: merged locally as {merge_sha[:10]} but `git push origin {base}` FAILED; fix the push, then re-run approve (the merge is idempotent)")
+            log(f"approve {iid}: {merged} locally as {merge_sha[:10]} but `git push origin {base}` FAILED; "
+                f"fix the push, then re-run approve (safe to repeat)")
             return False
-    released = _release_branch(cfg, rp, br, force=False, action="approve")
 
+    # Record the outcome BEFORE deleting the branch: if this fails the item stays
+    # in_review with its branch intact and approve can simply be re-run.
     def fn(item: dict):
         item["merged"] = today()
         item["merge_commit"] = merge_sha
-    mutate_backlog(cfg, iid, fn, archive_as="done")
+    try:
+        mutate_backlog(cfg, iid, fn, archive_as="done")
+    except Exception as e:  # noqa: BLE001
+        log(f"approve {iid}: {merged} + {pushed}, but recording it in the backlog failed ({e}); branch kept — re-run approve")
+        return False
     g = backlog_commit(cfg, f"backlog: {iid} -> done ({br} merged {merge_sha[:10]})", push=True)
-    log(f"approve {iid}: merged {br} into {base} as {merge_sha[:10]}; {pushed}; {released}; backlog {g}")
+    released = _release_branch(cfg, rp, br, force=False, action="approve")
+    log(f"approve {iid}: {merged} {br} into {base} as {merge_sha[:10]}; {pushed}; {released}; backlog {g}")
     return True
 
 
@@ -1071,13 +1161,15 @@ def drop_one(cfg: Config, iid: str, *, log=print) -> bool:
     released = "no branch"
     rp, br = repo_path(cfg, it.get("repo")), it.get("branch")
     if rp and br:
-        released = _release_branch(cfg, rp, br, force=True, action="drop")
-        if released.startswith("branch kept"):
-            log(f"drop {iid}: {released}; item left as is"); return False
+        wt = _worktree_for_branch(rp, br)
+        if wt and git(wt["path"], "status", "--porcelain", check=False).strip():
+            log(f"drop {iid}: its worktree {wt['path']} has uncommitted changes; item left as is"); return False
 
     def fn(item: dict):
         item["dropped"] = today()
-    mutate_backlog(cfg, iid, fn, archive_as="dropped")
+    mutate_backlog(cfg, iid, fn, archive_as="dropped")   # record first, then delete (journaled)
+    if rp and br:
+        released = _release_branch(cfg, rp, br, force=True, action="drop")
     g = backlog_commit(cfg, f"backlog: {iid} -> dropped", push=True)
     log(f"drop {iid}: {released}; backlog {g}")
     return True
@@ -1117,11 +1209,12 @@ def cmd_hold(args, cfg: Config) -> int:
             raise ValueError(f"{iid} is {item.get('status')}, not open/in_review")
         item["status"] = "held"
         item["note"] = args.note
-    try:
-        mutate_backlog(cfg, iid, fn)
-    except (KeyError, ValueError) as e:
-        print(f"hold: {e}", file=sys.stderr); return 1
-    print(f"hold {iid}: held — {backlog_commit(cfg, f'backlog: {iid} -> held', push=True)}")
+    with RunLock(cfg):
+        try:
+            mutate_backlog(cfg, iid, fn)
+        except (KeyError, ValueError) as e:
+            print(f"hold: {e}", file=sys.stderr); return 1
+        print(f"hold {iid}: held — {backlog_commit(cfg, f'backlog: {iid} -> held', push=True)}")
     return 0
 
 
@@ -1133,13 +1226,14 @@ def cmd_reopen(args, cfg: Config) -> int:
             raise ValueError(f"{iid} is {item.get('status')}, not held")
         item["status"] = "open"
         item.pop("worked", None)
-        if item.get("note", "").startswith("runner:"):
+        if str(item.get("note", "")).startswith("runner:"):
             item.pop("note", None)
-    try:
-        mutate_backlog(cfg, iid, fn)
-    except (KeyError, ValueError) as e:
-        print(f"reopen: {e}", file=sys.stderr); return 1
-    print(f"reopen {iid}: open — {backlog_commit(cfg, f'backlog: {iid} -> open (reopened)', push=True)}")
+    with RunLock(cfg):
+        try:
+            mutate_backlog(cfg, iid, fn)
+        except (KeyError, ValueError) as e:
+            print(f"reopen: {e}", file=sys.stderr); return 1
+        print(f"reopen {iid}: open — {backlog_commit(cfg, f'backlog: {iid} -> open (reopened)', push=True)}")
     return 0
 
 

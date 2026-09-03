@@ -27,11 +27,13 @@ show / diff / list / hold / reopen
 
 ## How an item is worked
 
-1. **Plan.** Open items, oldest `created` first. `repo: none` or a missing repo dir,
-   an already-existing `claude/bl-<slug>` branch, or an unresolvable default branch
-   → the item is marked `held` with a note (cheap, unbounded). Workable items are
-   taken up to `--max-items` (default 2); the rest stay `open` for the next night.
-   `--dry-run` prints exactly this plan and changes nothing.
+1. **Plan.** Open items, oldest `created` first. `repo: none` or a missing repo dir, an
+   unsafe id, an unresolvable default branch, or an existing `claude/bl-<slug>` branch
+   that carries commits → the item is marked `held` with a note (cheap, unbounded). An
+   existing branch with **no** commits and no worktree is reclaimed (deleted, journaled)
+   and the item worked. Workable items are taken up to `--max-items` (default 2); the
+   rest stay `open` for the next night. `--dry-run` prints exactly this plan and changes
+   nothing.
 2. **Isolate.** `git worktree add -b claude/bl-<slug> <repo>/.claude/worktrees/bl-<slug> <default>`
    — the harness's own worktree home, so `session-gc snapshot` covers it too.
 3. **Run.** `claude -p - --output-format json --dangerously-skip-permissions --settings <deny>
@@ -84,9 +86,22 @@ show / diff / list / hold / reopen
 - **C4** `_apply()` writes only `in_review`/`held` (or leaves `open`); approve/drop/hold/reopen
   are separate human commands.
 
-Plus: one run at a time (flock on `~/projects/.backlog-run/lock`); per-item try/except so one
-failure never aborts the batch; bounded by `--max-items`, `--item-timeout`, `--deadline`,
-`--budget-usd`.
+Plus: one run at a time (flock on `~/projects/.backlog-run/lock`, contention exits 75);
+per-item try/except so one failure never aborts the batch; bounded by `--max-items`,
+`--item-timeout`, `--deadline`, `--budget-usd`.
+
+## Consistency under partial failure (council round 1, 2026-09-03)
+
+- A run's result is applied only if the item is **still `open`**; a concurrent human
+  hold/reopen wins and the result is kept as a `CONFLICT` note (branch kept).
+- Empty leftover `claude/bl-*` branches (no commits, no worktree) are reclaimed and
+  journaled on the next run instead of holding the item forever; leftovers with work hold.
+- `approve`: merge → push → **record in backlog** → delete branch; idempotent on re-run
+  (`merge-base --is-ancestor` short-circuits). `drop`: record → delete.
+- Archive moves write `archive.yaml` first; a crash between the two writes duplicates,
+  never loses; the duplicate is reconciled (archive wins) on the next locked write.
+- Item ids are validated as safe slugs before becoming branch names or paths.
+- All mutating commands (`work`, `approve`, `drop`, `hold`, `reopen`) take the run lock.
 
 ## Morning review
 

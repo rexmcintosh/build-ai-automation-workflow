@@ -172,9 +172,12 @@ def test_plan_orders_oldest_first_bounds_and_holds_unworkable(world):
     assert "2026-01-04-d" not in by
 
 
-def test_plan_holds_when_branch_already_exists(world):
+def test_plan_holds_when_branch_already_exists_with_work(world):
     cfg = world.build([item("2026-01-01-b")])
     git(world.repo, "branch", "claude/bl-b")
+    git(world.repo, "commit", "--allow-empty", "-qm", "earlier attempt", "--no-verify")
+    git(world.repo, "branch", "-f", "claude/bl-b", "HEAD")
+    git(world.repo, "reset", "-q", "--hard", "HEAD~1")
     (p,) = br.plan(cfg, load_items(cfg))
     assert p.action == "hold" and "already exists" in p.reason
 
@@ -553,3 +556,89 @@ def test_run_lock_is_exclusive(world):
             capture_output=True, text=True)
     assert "GOT IT" not in p.stdout
     assert "another run holds the lock" in p.stderr
+
+
+# ----------------------------------------------------------------------------- council round 1 fixes
+
+
+def test_plan_reclaims_empty_leftover_branch_but_holds_one_with_work(world):
+    cfg = world.build([item("2026-01-01-a"), item("2026-01-02-b", created="2026-01-02")])
+    git(world.repo, "branch", "claude/bl-a")                       # empty leftover
+    worked_branch(world.repo, "claude/bl-b")                       # has a commit + worktree
+    planned = {p.item["id"]: p for p in br.plan(cfg, load_items(cfg))}
+    assert planned["2026-01-01-a"].action == "work" and planned["2026-01-01-a"].reclaim
+    assert planned["2026-01-02-b"].action == "hold" and "with work on it" in planned["2026-01-02-b"].reason
+
+
+def test_work_reclaims_empty_branch_then_works(world):
+    cfg = world.build([item("2026-01-01-a")])
+    git(world.repo, "branch", "claude/bl-a")
+    (p,) = br.plan(cfg, load_items(cfg))
+    res = br.work_one(cfg, p, reviewer=stub_reviewer, log=lambda *a: None)
+    assert res["status"] == "in_review"
+    assert "reclaim-empty" in Path(cfg.journal_path).read_text()
+    assert git(world.repo, "rev-list", "--count", "main..claude/bl-a").strip() == "1"
+
+
+def test_plan_holds_unsafe_ids(world):
+    cfg = world.build([item("2026-01-01-../evil"), item("2026-01-01-ok")])
+    planned = {p.item["id"]: p for p in br.plan(cfg, load_items(cfg))}
+    assert planned["2026-01-01-../evil"].action == "hold" and "not a safe slug" in planned["2026-01-01-../evil"].reason
+    assert planned["2026-01-01-ok"].action == "work"
+
+
+def test_apply_does_not_clobber_a_status_changed_during_the_run(world):
+    cfg = world.build([item("2026-01-01-a")])
+    (p,) = br.plan(cfg, load_items(cfg))
+    # a human parks the item while the session is running
+    br.mutate_backlog(cfg, "2026-01-01-a", lambda it: it.update(status="held", note="human: wait"))
+    res = br.work_one(cfg, p, reviewer=stub_reviewer, log=lambda *a: None)
+    assert res["status"] == "in_review" and res.get("conflict")
+    (it,) = load_items(cfg)
+    assert it["status"] == "held"
+    assert it["note"].startswith("runner: CONFLICT") and "claude/bl-a" in it["note"]
+    assert git(world.repo, "branch", "--list", "claude/bl-a").strip()   # work is not thrown away
+    assert "conflict note" in git(cfg.backlog_dir, "log", "-1", "--format=%s")
+
+
+def test_approve_records_before_releasing_branch(world, monkeypatch):
+    cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
+    worked_branch(world.repo, "claude/bl-a")
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(br, "mutate_backlog", boom)
+    msgs = []
+    assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
+    assert "recording it in the backlog failed" in msgs[-1]
+    assert git(world.repo, "branch", "--list", "claude/bl-a").strip()   # branch kept for the retry
+    assert load_items(cfg)[0]["status"] == "in_review"
+    monkeypatch.undo()
+    # the retry: already merged -> no second merge, then archived + released
+    assert br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
+    assert "already merged" in msgs[-1]
+    assert git(world.repo, "rev-list", "--count", "--merges", "origin/main").strip() == "1"
+    assert not git(world.repo, "branch", "--list", "claude/bl-a").strip()
+    assert br.load_yaml(cfg.archive_path)["items"][0]["status"] == "done"
+
+
+def test_reconcile_archive_wins_after_interrupted_move(world):
+    cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a"), item("2026-01-02-b", created="2026-01-02")])
+    arch = br.load_yaml(cfg.archive_path)
+    arch["items"].append(dict(item("2026-01-01-a"), status="done"))
+    br.write_yaml_atomic(cfg.archive_path, arch)                     # crash landed here last time
+    br.mutate_backlog(cfg, "2026-01-02-b", lambda it: it.update(status="held"))
+    assert [it["id"] for it in load_items(cfg)] == ["2026-01-02-b"]
+    assert len(br.load_yaml(cfg.archive_path)["items"]) == 1
+
+
+def test_run_lock_contention_exits_75(world):
+    cfg = world.build([])
+    with br.RunLock(cfg):
+        p = subprocess.run([
+            "python3", "-c",
+            "import sys; sys.path.insert(0, %r); from backlogrun import cli as br; "
+            "cfg = br.Config(state_dir=%r); br.RunLock(cfg).__enter__()"
+            % (str(Path(br.__file__).resolve().parents[1]), cfg.state_dir)],
+            capture_output=True, text=True)
+    assert p.returncode == br.EX_TEMPFAIL == 75

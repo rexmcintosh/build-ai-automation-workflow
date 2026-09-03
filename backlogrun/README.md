@@ -34,6 +34,21 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 - It must end with a `RUNNER-OUTCOME: done|held|failed` block; `held` is its escape hatch
   for anything that needs a human or an outward action.
 
+## Guarantees under failure
+
+- An item is only transitioned if it is **still `open`** when the run finishes. If you
+  held/reopened it meanwhile, your state wins and the run's result becomes a
+  `runner: CONFLICT …` note (the branch is kept).
+- An empty leftover `claude/bl-*` branch (no commits, no worktree) is reclaimed on the next
+  run, journaled; a leftover branch **with** work holds the item instead.
+- A council failure is recorded as the verdict (`REVIEW FAILED: …`); the item still goes to
+  `in_review` — the morning report shows it, you review by hand.
+- `approve` records the merge in the backlog **before** deleting the branch and is safe to
+  re-run (an already-merged branch is not merged twice). `drop` records before deleting.
+- An archive move writes `archive.yaml` first; an id found in both files is reconciled in
+  favour of the archive on the next write.
+- Lock contention exits 75 (`EX_TEMPFAIL`), so a skipped nightly run shows up in `cron.log`.
+
 ## Item fields the runner writes
 
 `status`, `branch`, `worked`, `council`, `note`, `session` (claude session id), `cost_usd`.
