@@ -1329,10 +1329,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    # cron/log friendliness: progress lines land in cron.log as they happen, not at exit
+    # cron/log friendliness: progress lines land in cron.log as they happen, not at exit;
+    # and `backlog-run report | head` must not end in a BrokenPipeError traceback.
     try:
         sys.stdout.reconfigure(line_buffering=True)
-    except (AttributeError, ValueError):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError, OSError):
         pass
     args = build_parser().parse_args(argv)
     cfg = Config()
