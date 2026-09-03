@@ -73,8 +73,13 @@ show / diff / list / hold / reopen
 - **C2 no outward actions.** Five layers, verified 2026-09-03 on claude 2.1.259:
   1. environment whitelist (HOME/PATH/USER/LANG/TERM/TZ + `BACKLOG_RUN=1`, `CI=1`) — no
      `~/.env` secrets, no Claude-session vars, so a nested session starts clean;
-  2. `GIT_CONFIG_*` env sets every remote's `pushurl` to a non-existent path — command-line-
-     level config, nothing in a config file can undo it; `git push` fails structurally;
+  2. `GIT_CONFIG_*` env sets `url.<dead-path>.pushInsteadOf` for `https://`, `http://`,
+     `git@`, `ssh://`, `git://` — a push to any real remote, whatever its name, even one
+     added later, is rewritten to a path that does not exist and fails; fetches keep the
+     real URL; local-path remotes (test suites' temp repos) still work. Command-line-level
+     config, so no config file can undo it; a `git -c remote.X.pushurl=…` could, which the
+     deny rules cover. (First cut overrode each remote's `pushurl`; the real run showed it
+     also broke 11 loom tests that push to a temp `origin`.)
   3. `--settings` deny rules (push, remote, gh pr/release, wrangler, deploy scripts, netlify,
      vercel, supabase, stripe, curl/wget/ssh/scp/rsync, crontab, systemctl, sudo, docker,
      tg-send, mail, pipx) — enforced even under `--dangerously-skip-permissions`;

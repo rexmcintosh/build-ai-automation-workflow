@@ -20,9 +20,11 @@ import json, os, subprocess, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
 mode = open(os.path.join(here, "mode.txt")).read().strip()
 prompt = sys.stdin.read()
-push = subprocess.run(["git", "push", "origin", "HEAD"], capture_output=True, text=True)
+push = subprocess.run(["git", "push", "hub", "HEAD"], capture_output=True, text=True)
+local = subprocess.run(["git", "push", "origin", "HEAD:refs/heads/probe"], capture_output=True, text=True)
 json.dump({"env": dict(os.environ), "prompt": prompt, "argv": sys.argv[1:], "cwd": os.getcwd(),
-           "push_rc": push.returncode, "push_err": push.stderr},
+           "push_rc": push.returncode, "push_err": push.stderr,
+           "local_push_rc": local.returncode, "local_push_err": local.stderr},
           open(os.path.join(here, "capture.json"), "w"))
 if mode == "hang":
     time.sleep(60)
@@ -86,6 +88,7 @@ def make_repo(root: Path, name: str, *, remote: bool = True) -> Path:
         git(repo, "init", "-q", "--bare", str(bare))
         git(repo, "remote", "add", "origin", str(bare))
         git(repo, "push", "-q", "-u", "origin", "main")
+        git(repo, "remote", "add", "hub", "https://github.com/example/alpha.git")   # a "real" remote, never contacted
     return repo
 
 
@@ -243,8 +246,9 @@ def test_scrubbed_env_has_no_secrets_and_disables_push(world):
     env = br.scrubbed_env(str(world.repo), ["/opt/node/bin"])
     assert "VENICE_API_KEY" not in env and "STRIPE_SECRET_KEY" not in env
     assert not any(k.startswith("CLAUDE") for k in env)
-    assert env["GIT_CONFIG_COUNT"] == "1"
-    assert env["GIT_CONFIG_KEY_0"] == "remote.origin.pushurl"
+    assert env["GIT_CONFIG_COUNT"] == str(len(br.NO_PUSH_SCHEMES))
+    assert env["GIT_CONFIG_KEY_0"] == f"url.{br.NO_PUSH_BASE}.pushInsteadOf"
+    assert {env[f"GIT_CONFIG_VALUE_{i}"] for i in range(len(br.NO_PUSH_SCHEMES))} == set(br.NO_PUSH_SCHEMES)
     assert env["PATH"].startswith("/opt/node/bin:")
     assert os.path.join(br.HOME, ".local", "bin") in env["PATH"]
     assert env["BACKLOG_RUN"] == "1" and env["TERM"] == "dumb"
@@ -296,7 +300,9 @@ def test_work_done_flow_end_to_end(world):
     # what the session saw
     cap = world.capture()
     assert cap["cwd"].endswith(os.path.join(".claude", "worktrees", "bl-a"))
-    assert cap["push_rc"] != 0 and "nonexistent" in cap["push_err"]
+    assert cap["push_rc"] != 0 and "nonexistent" in cap["push_err"]          # real remote: blocked
+    assert cap["local_push_rc"] == 0, cap["local_push_err"]                   # local temp remote: allowed (test suites)
+    assert git(world.repo, "ls-remote", "--heads", "origin", "probe").strip()
     assert "VENICE_API_KEY" not in cap["env"] and "CLAUDECODE" not in cap["env"]
     assert "--strict-mcp-config" in cap["argv"] and "--settings" in cap["argv"]
     assert "--dangerously-skip-permissions" in cap["argv"]

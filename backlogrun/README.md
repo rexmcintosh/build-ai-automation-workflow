@@ -29,9 +29,10 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 
 - cwd = the worktree; prompt = runner contract + the item's `prompt`; the repo's own
   CLAUDE.md applies.
-- A whitelist environment (no `~/.env`, no Claude-session vars), `git push` disabled via
-  `GIT_CONFIG_*` pushurl override, deny rules for push/deploy/send/spend commands (held in
-  `~/projects/.backlog-run/claude-settings.json`), no MCP servers.
+- A whitelist environment (no `~/.env`, no Claude-session vars); `git push` to any
+  https/ssh/git remote rewritten to a dead path via `GIT_CONFIG_*` `pushInsteadOf` (local-path
+  remotes, i.e. temp repos in test suites, still work); deny rules for push/deploy/send/spend
+  commands (held in `~/projects/.backlog-run/claude-settings.json`); no MCP servers.
 - It must end with a `RUNNER-OUTCOME: done|held|failed` block; `held` is its escape hatch
   for anything that needs a human or an outward action.
 

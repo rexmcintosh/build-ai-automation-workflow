@@ -474,11 +474,20 @@ def plan(cfg: Config, items: list[dict], *, only: list[str] | None = None,
 # ----------------------------------------------------------------------------- session
 
 
+NO_PUSH_BASE = "/nonexistent/backlog-run-no-push/"
+# Every scheme a real remote uses. Local-path remotes (temp repos in test suites) are
+# deliberately NOT rewritten, so `git push` to a tmp bare repo inside a test still works.
+NO_PUSH_SCHEMES = ("https://", "http://", "git@", "ssh://", "git://")
+
+
 def scrubbed_env(repo: str, extra_path: list[str] | None = None) -> dict:
     """C2(a)+(b): a whitelist environment for the session. No secrets from the
-    parent (no *_KEY, *TOKEN*, CLAUDE*), and every remote's pushurl pointed at a
-    path that does not exist — GIT_CONFIG_* is command-line-level config, so nothing
-    in any config file can undo it."""
+    parent (no *_KEY, *TOKEN*, CLAUDE*), and `url.<dead-path>.pushInsteadOf` for every
+    real URL scheme — so a push to any https/ssh/git remote, whatever its name and even
+    one added later, is rewritten to a path that does not exist and fails. Fetches keep
+    the real URL. GIT_CONFIG_* is command-line-level config, so no config FILE can undo
+    it (a `git -c remote.X.pushurl=…` could — that is what the deny rules are for;
+    verified 2026-09-03)."""
     env = {
         "HOME": HOME, "USER": os.environ.get("USER", "dev"), "LOGNAME": os.environ.get("LOGNAME", os.environ.get("USER", "dev")),
         "LANG": os.environ.get("LANG", "C.UTF-8"), "LC_ALL": os.environ.get("LC_ALL", ""), "TERM": "dumb",
@@ -491,13 +500,10 @@ def scrubbed_env(repo: str, extra_path: list[str] | None = None) -> dict:
         if p not in parts:
             parts.append(p)
     env["PATH"] = ":".join(parts)
-    remotes = [r for r in git(repo, "remote", check=False).split() if r]
-    n = 0
-    for r in remotes:
-        env[f"GIT_CONFIG_KEY_{n}"] = f"remote.{r}.pushurl"
-        env[f"GIT_CONFIG_VALUE_{n}"] = "/nonexistent/backlog-run-no-push"
-        n += 1
-    env["GIT_CONFIG_COUNT"] = str(n)
+    for n, scheme in enumerate(NO_PUSH_SCHEMES):
+        env[f"GIT_CONFIG_KEY_{n}"] = f"url.{NO_PUSH_BASE}.pushInsteadOf"
+        env[f"GIT_CONFIG_VALUE_{n}"] = scheme
+    env["GIT_CONFIG_COUNT"] = str(len(NO_PUSH_SCHEMES))
     return env
 
 
