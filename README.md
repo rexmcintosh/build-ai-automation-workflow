@@ -2,6 +2,10 @@
 
 Home of the VPS + Venice AI multi-agent PR review setup, plus the automation workflow built on top of it.
 
+For current automation work, start with the [outcome-led assessment](docs/automation-ops-2026-09-05.md)
+and [scheduled-job contracts](docs/contracts/README.md). They distinguish observed
+runtime behavior from the historical architecture below.
+
 > **New here? Start with [`docs/OVERVIEW.md`](docs/OVERVIEW.md)** — a plain-English,
 > non-technical explanation of what this project is and the thinking behind it
 > (the @levelsio × Naval inspiration, the AI-builds → AI-panel-reviews → human-approves model).
