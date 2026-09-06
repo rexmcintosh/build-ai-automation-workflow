@@ -15,6 +15,8 @@ import yaml
 
 from backlogrun import cli as br
 
+REAL_COUNCIL_REVIEW = br.council_review
+
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +45,12 @@ if mode != "done-nochange":
 text = "I did things.\n\n"
 if outcome:
     text += f"RUNNER-OUTCOME: {outcome}\nRUNNER-SUMMARY: summary for {mode}\nRUNNER-OPERATOR-STEPS: none\n"
+if 'Required validation names declared before this run: ["fixture"]' in prompt:
+    check = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    text += "RUNNER-VALIDATIONS: " + json.dumps([{"name": "fixture", "branch_sha": sha,
+             "status": "passed" if check.returncode == 0 and not check.stdout.strip() else "failed",
+             "evidence": "git status --porcelain; exit=" + str(check.returncode) + "\n" + check.stdout}]) + "\n"
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
                   "session_id": "sess-1234-abcd", "total_cost_usd": 1.234, "permission_denials": []}))
 '''
@@ -228,7 +236,7 @@ def test_mutate_backlog_rereads_before_writing(world):
 @pytest.mark.parametrize("text,outcome,summary", [
     ("blah\nRUNNER-OUTCOME: done\nRUNNER-SUMMARY: did it\nRUNNER-OPERATOR-STEPS: none\n", "done", "did it"),
     ("RUNNER-OUTCOME: `held`\nRUNNER-SUMMARY: needs a key\n  second line\nRUNNER-OPERATOR-STEPS: add KEY to ~/.env", "held", "needs a key second line"),
-    ("first RUNNER-OUTCOME: failed\n later RUNNER-OUTCOME: done\nRUNNER-SUMMARY: ok", "done", "ok"),
+    ("RUNNER-OUTCOME: failed\n RUNNER-OUTCOME: done\nRUNNER-SUMMARY: ok", "done", "ok"),
     ("no block here", "", ""),
     ("the RUNNER-OUTCOME line should say done", "", ""),
     ("**RUNNER-OUTCOME:** done\n**RUNNER-SUMMARY:** bold summary\n**RUNNER-OPERATOR-STEPS:** none", "done", "bold summary"),
@@ -711,3 +719,256 @@ def test_deny_rules_cover_push_variants(world):
     deny = json.load(open(cfg.settings_path))["permissions"]["deny"]
     for must in ("Bash(git -c * push*)", "Bash(git -C * push*)", "Bash(git --git-dir* push*)", "Bash(git remote*)"):
         assert must in deny
+
+# ----------------------------------------------------------------------------- truthful review readiness
+
+
+def clean_reviewer(cfg, diff, *, item_id):
+    return {"ok": True, "summary": "Explicit clean review", "markdown": "Full clean review",
+            "review_status": "clean", "blocking_findings": []}
+
+
+@pytest.mark.parametrize("mode,reviewer,required,expected", [
+    ("done", clean_reviewer, [], "ready"),
+    ("done", clean_reviewer, ["fixture"], "ready"),
+    ("done", clean_reviewer, ["missing-check"], "unknown"),
+    ("done", clean_reviewer, None, "unknown"),
+    ("nomarker", clean_reviewer, [], "unknown"),
+    ("held", clean_reviewer, [], "unknown"),
+    ("failed", clean_reviewer, [], "failed"),
+    ("done", stub_reviewer, [], "unknown"),
+    ("done", False, [], "unknown"),
+])
+def test_readiness_work_to_report(world, mode, reviewer, required, expected):
+    cfg = world.build([item("2026-01-01-a", required_validations=required)])
+    world.mode(mode)
+    (p,) = br.plan(cfg, load_items(cfg))
+    result = br.work_one(cfg, p, reviewer=reviewer, log=lambda *a: None)
+    assert result["review_readiness"]["status"] == expected
+    before = Path(cfg.backlog_path).read_bytes()
+    report = br.write_report(cfg)
+    metadata = json.loads(Path(cfg.report_json).read_text())["review_readiness"]["2026-01-01-a"]
+    assert metadata["status"] == expected
+    assert br.READINESS_LABELS[expected] in report
+    assert Path(metadata["review_path"]).is_file()
+    assert Path(cfg.backlog_path).read_bytes() == before
+    assert ("`backlog-run approve 1`" in report) == (expected == "ready")
+    if mode == "nomarker":
+        assert "treating as done" not in result["note"]
+        assert "completion is unknown" in result["note"]
+    records = list(Path(cfg.reviews_dir).glob("*.inputs.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert record["branch_sha"] == git(world.repo, "rev-parse", "claude/bl-a").strip()
+    assert record["required_validations"] == required
+    if required == ["fixture"]:
+        assert "git status --porcelain; exit=0" in (Path(cfg.state_dir) / record["validations"][0]["evidence_path"]).read_text()
+
+
+def test_required_condition_beyond_400_survives_every_surface(world, capsys):
+    condition = "Context. " * 70 + "REQUIRED: fix the incorrect result before merging."
+    def reviewer(*args, **kw):
+        return {"ok": True, "summary": "Approve after required changes", "markdown": "Full council output",
+                "review_status": "changes_requested", "blocking_findings": [condition]}
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    result = br.work_one(cfg, p, reviewer=reviewer, log=lambda *a: None)
+    assert result["status"] == "in_review"
+    assert condition in br.write_report(cfg)
+    summary = br.summarize_run([result])
+    assert "Changes requested" in summary and "backlog-run show 2026-01-01-a" in summary
+    assert "Approve after" not in summary
+    assert br.cmd_show(br.build_parser().parse_args(["show", "1"]), cfg) == 0
+    assert condition in capsys.readouterr().out
+    assert condition in Path(result["review_readiness"]["review_path"]).read_text()
+    assert condition in json.loads(Path(cfg.report_json).read_text())["review_readiness"]["2026-01-01-a"]["reasons"]
+
+
+@pytest.mark.parametrize("throws", [False, True])
+def test_failed_reviewer_preserves_branch_and_reports_failure(world, throws):
+    def reviewer(*args, **kwargs):
+        if throws:
+            raise RuntimeError("review unavailable")
+        return {"ok": False, "summary": "REVIEW FAILED: provider unavailable"}
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    result = br.work_one(cfg, p, reviewer=reviewer, log=lambda *a: None)
+    assert result["status"] == "in_review"
+    assert result["review_readiness"]["status"] == "failed"
+    assert "Review or checks failed" in br.write_report(cfg)
+    assert git(world.repo, "branch", "--list", "claude/bl-a").strip()
+
+
+def test_report_recomputes_stale_evidence_and_ignores_cached_readiness(world):
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "ready"
+    git(world.repo, "switch", "claude/bl-a")
+    git(world.repo, "commit", "--allow-empty", "-qm", "changed after review")
+    git(world.repo, "switch", "main")
+    assert "Review readiness unknown" in br.write_report(cfg)
+    assert "`backlog-run approve 1`" not in Path(cfg.report_path).read_text()
+    assert json.loads(next(Path(cfg.reviews_dir).glob("*.readiness.json")).read_text())["status"] == "ready"
+
+
+def test_newest_unfinished_or_malformed_attempt_never_reuses_clean_evidence(world):
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    name = "2099-01-01T000000Z-2026-01-01-a"
+    (Path(cfg.runs_dir) / f"{name}.json").write_text('{"started_at":"2099-01-01T00:00:00Z"}')
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "unknown"
+    (Path(cfg.reviews_dir) / f"{name}.inputs.json").write_text("{partial")
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "unknown"
+
+
+def test_legacy_review_is_unknown_but_full_review_stays_accessible(world):
+    cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a", council="approve!")])
+    worked_branch(world.repo, "claude/bl-a")
+    br.ensure_state(cfg)
+    path = Path(cfg.reviews_dir) / "2026-01-01-a.md"
+    path.write_text("Historical full review; required work is still pending.")
+    report = br.write_report(cfg)
+    assert "Review readiness unknown" in report and str(path) in report
+    assert "`backlog-run approve 1`" not in report
+
+
+@pytest.mark.parametrize("payload", ['null', '{"name":"x"}', '[{"name":"x","status":"passed"}]', '[1]', 'not json'])
+def test_malformed_validation_capture_never_becomes_ready(world, payload):
+    cfg = world.build([])
+    br.ensure_state(cfg)
+    captured = br._capture_validations(cfg, "fixture", "RUNNER-VALIDATIONS: " + payload)
+    result = br._save_review(cfg, iid="x", stem="fixture", sha="a" * 40, kind="done",
+                             required=[], validations=captured, rev=clean_reviewer(None, None, item_id="x"))
+    assert result["status"] == "unknown"
+
+
+@pytest.mark.parametrize("variant,expected", [("clean", "clean"), ("conditions", "changes_requested"),
+    ("legacy", "unknown"), ("synthesis_error", "failed"), ("member_error", "failed"),
+    ("missing_member", "unknown"), ("truncated", "unknown"), ("malformed_blocks", "unknown"), ("missing_blocks", "unknown"), ("mixed_changes", "unknown"), ("empty_panel", "unknown"), ("duplicate_member", "unknown")])
+def test_real_council_adapter_uses_structured_evidence_only(world, monkeypatch, variant, expected):
+    from types import SimpleNamespace
+    import council.config as config
+    import council.engine as engine
+    import council.venice as venice
+    from council.models import Member, MemberResult, Panel
+    from tests.conftest import FakeClient
+    cfg = world.build([])
+    condition = "Context. " * 70 + "Required fix at the end."
+    payload = {"recommendation": condition, "confidence": 9, "review_status": "clean", "required_changes": [], "blocking_findings": []}
+    if variant == "conditions":
+        payload.update(review_status="changes_requested", required_changes=[condition])
+    if variant == "legacy":
+        payload.pop("review_status")
+    if variant == "malformed_blocks":
+        payload["blocking_findings"] = "must fix data loss"
+    if variant == "missing_blocks":
+        payload.pop("blocking_findings")
+    if variant == "mixed_changes":
+        payload["required_changes"] = ["fix the wrong answer", 3]
+    fake = FakeClient(default=payload, raises_for={"chair"} if variant == "synthesis_error" else set())
+    panel = Panel("code-review", "fixture", [Member("a", "m1", "x"), Member("b", "m2", "x")])
+    results = [MemberResult("a", "m1", "approve", "ok"), MemberResult("b", "m2", "approve", "ok")]
+    if variant == "member_error":
+        results[0].error = "provider unavailable"
+    if variant == "missing_member":
+        results.pop()
+    if variant == "empty_panel":
+        panel.members = []
+        results = []
+    if variant == "duplicate_member":
+        results[1] = results[0]
+    monkeypatch.setattr(config, "load_panels", lambda _: (SimpleNamespace(timeout=1, byte_cap=5 if variant == "truncated" else 100000, chair_model="chair"), {"code-review": panel}))
+    monkeypatch.setattr(config, "get_api_key", lambda: "fake")
+    monkeypatch.setattr(engine, "run_panel", lambda *args, **kw: results)
+    monkeypatch.setattr(venice, "VeniceClient", lambda *args, **kw: fake)
+    rev = REAL_COUNCIL_REVIEW(cfg, "diff with enough content to truncate", item_id="x")
+    assert rev["review_status"] == expected
+    assert rev["ok"] == (expected != "failed")
+    if variant == "conditions":
+        assert condition in rev["blocking_findings"] and condition in rev["summary"]
+    if variant == "malformed_blocks":
+        assert "must fix data loss" in rev["markdown"]
+    if variant == "mixed_changes":
+        assert "fix the wrong answer" in rev["markdown"]
+    assert "required_changes" in fake.calls[0]["system"]
+
+
+@pytest.mark.parametrize("bad", ["doneish", "failedness", "heldover"])
+def test_outcome_marker_requires_a_complete_word(bad):
+    assert br.parse_outcome("RUNNER-OUTCOME: " + bad)["outcome"] == ""
+
+
+@pytest.mark.parametrize("old_content", ["{partial", "{}", "null", '{"finished_at":"not a date"}'])
+def test_damaged_older_attempt_is_superseded_by_complete_new_review(world, old_content):
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    stem = "2020-01-01T000000Z-2026-01-01-a"
+    (Path(cfg.runs_dir) / f"{stem}.json").write_text('{}')
+    (Path(cfg.reviews_dir) / f"{stem}.inputs.json").write_text(old_content)
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "ready"
+
+
+def test_structured_validation_evidence_is_saved(world):
+    cfg = world.build([])
+    br.ensure_state(cfg)
+    payload = [{"name": "fixture", "branch_sha": "a" * 40, "status": "passed",
+                "evidence": {"command": "fixture", "exit_code": 0, "output": "passed"}}]
+    captured = br._capture_validations(cfg, "fixture", "RUNNER-VALIDATIONS: " + json.dumps(payload))
+    assert json.loads((Path(cfg.state_dir) / captured[0]["evidence_path"]).read_text())["exit_code"] == 0
+    result = br._save_review(cfg, iid="x", stem="fixture", sha="a" * 40, kind="done",
+                             required=["fixture"], validations=captured, rev=clean_reviewer(None, None, item_id="x"))
+    assert result["status"] == "ready"
+
+
+@pytest.mark.parametrize("bad_id", ["../outside", "/tmp/outside", "x/y", "a..b"])
+def test_unsafe_item_id_is_held_before_artifact_creation(world, bad_id):
+    cfg = world.build([item(bad_id)])
+    (p,) = br.plan(cfg, load_items(cfg))
+    result = br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    assert result["status"] == "held" and "invalid item ID" in result["note"]
+    assert not Path(cfg.runs_dir).exists()
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "unknown"
+
+
+@pytest.mark.parametrize("copied_id", [True, False])
+def test_new_attempt_cannot_reuse_copied_or_backdated_ready_input(world, copied_id):
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    (p,) = br.plan(cfg, load_items(cfg))
+    br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    record = json.loads(next(Path(cfg.reviews_dir).glob('*.inputs.json')).read_text())
+    stem = '2099-01-01T000000Z-2026-01-01-a'
+    (Path(cfg.runs_dir) / f'{stem}.json').write_text('{}')
+    if not copied_id:
+        record['record_id'] = stem  # date still predates the actual new attempt
+    (Path(cfg.reviews_dir) / f'{stem}.inputs.json').write_text(json.dumps(record))
+    assert br._review_readiness(cfg, load_items(cfg)[0])['status'] == 'unknown'
+
+
+@pytest.mark.parametrize("text", [
+    "Work is incomplete. I cannot claim RUNNER-OUTCOME: done because checks failed. No final block follows.",
+    "RUNNER-OUTCOME: done because that is what the example says.",
+])
+def test_prose_mention_cannot_establish_completion(world, monkeypatch, text):
+    cfg = world.build([item("2026-01-01-a", required_validations=[])])
+    real_run = br.run_session
+    def run(*args, **kwargs):
+        result = real_run(*args, **kwargs)
+        result["data"]["result"] = text
+        return result
+    monkeypatch.setattr(br, "run_session", run)
+    (p,) = br.plan(cfg, load_items(cfg))
+    result = br.work_one(cfg, p, reviewer=clean_reviewer, log=lambda *a: None)
+    assert result["review_readiness"]["status"] == "unknown"
+    assert "completion is unknown" in result["note"]
+
+
+def test_markdown_validation_marker_retains_evidence(world):
+    cfg = world.build([])
+    br.ensure_state(cfg)
+    payload = [{"name": "fixture", "branch_sha": "a" * 40, "status": "passed", "evidence": "check exited 0"}]
+    captured = br._capture_validations(cfg, "fixture", "**RUNNER-VALIDATIONS:** " + json.dumps(payload))
+    assert len(captured) == 1
+    assert (Path(cfg.state_dir) / captured[0]["evidence_path"]).read_text() == "check exited 0"

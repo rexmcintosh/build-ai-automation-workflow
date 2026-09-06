@@ -87,3 +87,60 @@ Environment overrides: `BACKLOG_PATH`, `BACKLOG_RUN_STATE`, `BACKLOG_RUN_PROJECT
 They run the whole `work`/`approve`/`drop` flow against temp git repos with a fake `claude`
 binary (no network, no real sessions) and assert the scrubbed environment, the pushurl
 guard, the state transitions, the YAML round trip and the lock.
+
+## Review readiness
+
+`in_review` means the work awaits your decision. It does not mean checks passed.
+The report now shows one of four evidence states for each worked branch:
+
+| State | Meaning | Suggested next step |
+|---|---|---|
+| Ready for your review | Explicit completed outcome, explicit clean council verdict, and the declared checks passed for the current branch commit. | Read the full evidence, then decide. |
+| Changes requested | The council names unresolved fixes or conditions. | Address the listed conditions. |
+| Review or checks failed | The runner, reviewer, synthesis, or a required check failed. | Inspect the failure evidence. |
+| Review readiness unknown | Evidence is missing, malformed, incomplete, contradictory, or covers another commit. | Inspect or refresh the evidence. |
+
+The outcome marker must occupy its own line; merely mentioning it in prose cannot
+establish completion. Markdown decoration around the marker is supported.
+The report preserves full conditions and links to the full review. Its JSON adds
+`review_readiness`, keyed by item ID; the existing `numbers` mapping stays intact.
+`show` displays the same readiness and full evidence. Short notifications state
+readiness and point to `show`, instead of clipping a possibly conditional verdict.
+Only ready rows suggest the numbered `approve` command. This is display guidance:
+`approve` keeps its existing human authority and behavior, including `--held`.
+There is no new approval gate and no automatic merge.
+
+For new items, an optional `required_validations` list declares check names before
+the session starts, for example `required_validations: [pytest, lint]`. Names are
+labels, not commands that the parent runner executes. The session follows the
+repo's instructions to run them and returns a one-line `RUNNER-VALIDATIONS` JSON
+array with `name`, `branch_sha`, `status` (`passed`, `failed`, or `unknown`), and
+`evidence` (command, exit code, and output, as a string or JSON object). The runner saves that evidence and
+includes it in the council's input. Results are explicitly **session-reported**;
+the parent does not independently rerun the commands. All reported checks must
+refer to the reviewed commit. Missing or malformed results cannot imply success.
+
+An absent required list means validation coverage is unknown, even if the review
+is clean. An explicit empty list is appropriate only for work with no required
+commands. Neither the session nor this upgrade fills in or relaxes that list.
+Existing backlog records are not rewritten. A historical prose verdict, including
+one that says "approve", stays unknown with its old full review still accessible.
+
+Each new attempt creates `runs/<timestamp>-<id>.json` before starting the session,
+then fills in the raw result. Evidence lives under `reviews/` with the same stem:
+`.md` (complete review and conditions), `.validation-N.txt` (reported check output),
+`.inputs.json` (version 1 inputs), and `.readiness.json` (derived snapshot). The
+legacy `reviews/<id>.md` path remains the latest full review. Prior attempt files
+remain intact. Reports recompute from the inputs and the current branch commit;
+they never trust a cached ready snapshot. An unfinished or malformed newest
+attempt cannot reuse a clean older review.
+
+The evidence validator checks types, readable files inside the state directory,
+UTC timestamps, commit identity, and contradictory outcomes. A later complete
+review supersedes older evidence for the same commit. Conflicting duplicate IDs
+or conflicting newest records remain unknown. A truncated review input or an
+incomplete panel also remains unknown; reviewer or synthesis errors are failures.
+
+Run the focused checks with:
+
+    python3 -m pytest tests/test_backlogrun.py tests/test_backlog_readiness.py tests/test_synthesize.py -q
