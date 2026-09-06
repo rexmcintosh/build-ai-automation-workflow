@@ -231,6 +231,9 @@ tests pass. Show the owner the resulting report before merge approval.
 
 ## Concrete follow-on proposal: complete the existing alert handoff
 
+The [September 6 alert-handoff assessment](alert-handoff-2026-09-06.md) now records
+the event map, reproduced routing gaps, example alert and bounded build proposals.
+
 Target repo: `~/projects/build-ai-automation-workflow`. Sources:
 `session-bridge/README.md`, `session-bridge/src/`, `bin/tg-send`, `sessiongc/cli.py`,
 `council/scripts/security-sweep.sh`, `watchdog/monitors.toml`, and the installed
