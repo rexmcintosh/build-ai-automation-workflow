@@ -102,3 +102,7 @@ class Synthesis:
     cross_panel_themes: list[str] = field(default_factory=list)
     blocking_findings: list[ConfirmedBlock] = field(default_factory=list)
     error: str | None = None
+    # Optional explicit verdict used by backlog-run; prose never implies readiness.
+    review_status: str = "unknown"
+    required_changes: list[str] | None = None
+    raw_response: str = ""

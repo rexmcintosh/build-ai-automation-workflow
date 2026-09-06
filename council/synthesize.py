@@ -33,6 +33,7 @@ def synthesize(context: str, results: list[MemberResult], client, *, chair_model
     user = (f"ORIGINAL INPUT:\n{context}\n\n"
             f"PANELIST ANSWERS (they answered independently, blind to each other):\n"
             f"{_panel_digest(results)}")
+    raw = ""
     try:
         raw = client.complete(chair_model, system, user, task_type=task_type)
         d = loads_lenient(raw)
@@ -48,12 +49,23 @@ def synthesize(context: str, results: list[MemberResult], client, *, chair_model
                   for b in d.get("blocking_findings", []) if isinstance(b, dict)]
         return Synthesis(
             recommendation=str(d.get("recommendation", "")),
+            raw_response=raw,
             confidence=_as_int(d.get("confidence", 5)),
             consensus=[str(c) for c in d.get("consensus", [])],
             disagreements=dis,
             cross_panel_themes=[str(t) for t in d.get("cross_panel_themes", [])],
             blocking_findings=blocks,
+            review_status=(d.get("review_status")
+                           if d.get("review_status") in ("clean", "changes_requested")
+                           and isinstance(d.get("blocking_findings"), list)
+                           and all(isinstance(b, dict) and isinstance(b.get("point"), str)
+                                   and b["point"].strip() and isinstance(b.get("why"), str)
+                                   and isinstance(b.get("severity"), str)
+                                   for b in d["blocking_findings"]) else "unknown"),
+            required_changes=(d["required_changes"] if isinstance(d.get("required_changes"), list)
+                              and all(isinstance(x, str) and x.strip() for x in d["required_changes"])
+                              else None),
         )
     except Exception as e:  # noqa: BLE001
         return Synthesis(recommendation="(synthesis unavailable — see raw panel below)",
-                         confidence=0, error=f"{type(e).__name__}: {e}")
+                         confidence=0, error=f"{type(e).__name__}: {e}", raw_response=raw)

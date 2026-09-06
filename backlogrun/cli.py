@@ -58,6 +58,7 @@ from pathlib import Path
 import yaml
 
 from sessiongc.cli import GitError, default_branch_ref, git, git_ok, parse_worktrees
+from backlogrun import readiness
 
 HOME = os.path.expanduser("~")
 PROJECTS = os.path.join(HOME, "projects")
@@ -70,7 +71,8 @@ TG_CHAT_DEFAULT = "7735693897"
 USAGE_LIMIT_RE = re.compile(r"hit your session limit|usage limit|limit reached|rate limit",
                             re.IGNORECASE)
 # Tolerant of markdown dress-up: `**RUNNER-OUTCOME:** done`, `RUNNER-OUTCOME: \`held\``, etc.
-OUTCOME_RE = re.compile(r"RUNNER-OUTCOME\**:\**\s*[`*_]*(done|held|failed)", re.IGNORECASE)
+OUTCOME_RE = re.compile(r"^[ \t]*\**RUNNER-OUTCOME\**:\**[ \t]*[`*_]*(done|held|failed)[`*_]*[ \t]*$",
+                        re.IGNORECASE | re.MULTILINE)
 SUMMARY_RE = re.compile(r"RUNNER-SUMMARY\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\Z)", re.IGNORECASE | re.DOTALL)
 STEPS_RE = re.compile(r"RUNNER-OPERATOR-STEPS\**:?\**\s*(.*?)(?=\n\s*\**RUNNER-[A-Z-]+|\n\s*```|\Z)",
                       re.IGNORECASE | re.DOTALL)
@@ -580,6 +582,15 @@ End your final message with exactly this block. The runner parses it:
 RUNNER-OUTCOME: done | held | failed
 RUNNER-SUMMARY: <1-3 lines: what changed, what you ran, assumptions>
 RUNNER-OPERATOR-STEPS: <none, or what a human must do after merging>
+RUNNER-VALIDATIONS: <one-line JSON array of check results, or [] if none>
+
+Required validation names declared before this run: {json.dumps(item.get('required_validations'))}
+For each check result provide name, branch_sha (the full commit actually checked),
+status (passed | failed | unknown), and evidence (the command, exit code, and output,
+as a text string or JSON object).
+Run checks against the final commit. Never claim a check passed without running it.
+These are session-reported results; the council and owner can inspect the evidence.
+An absent required list means coverage is unknown; do not invent or relax the list.
 
 Use `done` when the item is complete on this branch. Use `held` when a human decision or an outward action is required to finish. Use `failed` when you could not make useful progress; say why.
 
@@ -675,6 +686,7 @@ def council_review(cfg: Config, diff_text: str, *, item_id: str) -> dict:
         from council.engine import run_panel
         from council.render import render_markdown
         from council.synthesize import synthesize
+        from council.prompts import REVIEW_SYNTH_OUTPUT
         from council.venice import VeniceClient
         settings, panels = load_panels(None)
         try:
@@ -683,22 +695,180 @@ def council_review(cfg: Config, diff_text: str, *, item_id: str) -> dict:
             return {"ok": False, "summary": "REVIEW FAILED: no Venice key (VENICE_COUNCIL_KEY/VENICE_API_KEY)", "markdown": ""}
         client = VeniceClient(key, timeout=settings.timeout)
         panel = panels["code-review"]
-        ctx = truncate(f"Review this:\n\n{diff_text}", settings.byte_cap)
+        full_ctx = f"Review this:\n\n{diff_text}"
+        ctx = truncate(full_ctx, settings.byte_cap)
         results = run_panel(panel, ctx, client, task_type="chat")
-        syn = synthesize(ctx, results, client, chair_model=settings.chair_model, task_type="chat")
+        syn = synthesize(ctx, results, client, chair_model=settings.chair_model, task_type="chat",
+                         system=REVIEW_SYNTH_OUTPUT + "\nAlso return review_status: clean or changes_requested, "
+                         "and required_changes: a JSON list of ALL fixes or conditions required before merge, "
+                         "without truncation. Use changes_requested for conditional approval, even when the "
+                         "conditions fall below the blocking_findings severity bar. Use clean only when no "
+                         "changes are required, with required_changes: []. Do not infer executed checks "
+                         "from their names; distinguish supplied session evidence from independent results.")
         md = render_markdown(ctx[:120], syn, results, rigor=panel.default_rigor)
+        if syn.raw_response:
+            md += "\n\n### Raw chair response (including any malformed fields)\n\n```json\n" + syn.raw_response + "\n```\n"
         rec = re.sub(r"\s+", " ", (syn.recommendation or "").strip())
         blocking = len(getattr(syn, "blocking_findings", []) or [])
-        summary = (f"{today().isoformat()} council code-review (Venice panel): {rec[:400]}"
+        summary = (f"{today().isoformat()} council code-review (Venice panel): {rec}"
                    f" — confidence {syn.confidence}/10" + (f"; {blocking} blocking" if blocking else ""))
-        if getattr(syn, "error", None):
-            summary = f"{today().isoformat()} council code-review: synthesis unavailable ({syn.error}); see review file"
-        return {"ok": True, "summary": summary, "markdown": md}
+        errors = [f"{r.member}: {r.error}" for r in results if r.error]
+        if syn.error:
+            errors.append(f"synthesis unavailable: {syn.error}")
+        complete_panel = (bool(panel.members)
+                          and sorted((r.member, r.model) for r in results)
+                          == sorted((m.name, m.model) for m in panel.members)
+                          and all(r.stance in ("approve", "concerns", "oppose") for r in results))
+        status = syn.review_status if syn.required_changes is not None else "unknown"
+        if ctx != full_ctx or not complete_panel:
+            status = "unknown"
+        if errors:
+            status = "failed"
+            summary = "REVIEW FAILED: " + "; ".join(errors) + "; see review file"
+        conditions = list(syn.required_changes or [])
+        conditions += [f"{b.point}: {b.why}" for b in syn.blocking_findings]
+        return {"ok": not errors, "summary": summary, "markdown": md,
+                "review_status": status, "blocking_findings": list(dict.fromkeys(conditions)),
+                "review_notes": errors + (["Review input was truncated."] if ctx != full_ctx else [])
+                + (["Review panel was incomplete."] if not complete_panel else [])}
     except Exception as e:  # noqa: BLE001 — the verdict IS the failure
         return {"ok": False, "summary": f"REVIEW FAILED: {type(e).__name__}: {str(e)[:300]}", "markdown": ""}
 
 
 # ----------------------------------------------------------------------------- work
+
+
+def _write_json(path: str | Path, value: object) -> None:
+    """Replace one report/record atomically; never leave a half-written JSON file."""
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as fh:
+        json.dump(value, fh, indent=1)
+        temp = fh.name
+    os.replace(temp, path)
+
+
+def _write_text(path: str | Path, text: str) -> None:
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as fh:
+        fh.write(text)
+        temp = fh.name
+    os.replace(temp, path)
+
+
+def _run_started_at(run: Path, suffix: str) -> datetime:
+    stamp = run.name[:-len(suffix)]
+    fmt = "%Y-%m-%dT%H%M%S.%fZ" if "." in stamp else "%Y-%m-%dT%H%M%SZ"
+    return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+
+
+def _capture_validations(cfg: Config, stem: str, text: str) -> list:
+    matches = re.findall(r"^[ \t]*\**RUNNER-VALIDATIONS\**:\**[ \t]*(.*)$", text, re.MULTILINE)
+    if not matches:
+        return []
+    try:
+        entries = json.loads(matches[-1])
+    except (ValueError, TypeError):
+        return [None]  # malformed evidence must not silently become an empty success
+    if not isinstance(entries, list):
+        return [None]
+    captured = []
+    for n, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            captured.append(None)
+            continue
+        evidence = entry.get("evidence")
+        if isinstance(evidence, dict) and evidence:
+            evidence = json.dumps(evidence, indent=2)
+        path = Path(cfg.reviews_dir) / f"{stem}.validation-{n}.txt"
+        if isinstance(evidence, str) and evidence.strip():
+            _write_text(path, evidence)
+        captured.append({"name": entry.get("name"), "branch_sha": entry.get("branch_sha"),
+                         "status": entry.get("status"),
+                         "evidence_path": os.path.relpath(path, cfg.state_dir)})
+    return captured
+
+
+def _save_review(cfg: Config, *, iid: str, stem: str, sha: str, kind: str,
+                 required: object, validations: list, rev: dict) -> dict:
+    path = Path(cfg.reviews_dir) / f"{stem}.md"
+    text = f"# council review — {iid} — {now_stamp()}\n\n" + str(rev.get("markdown") or rev.get("summary") or "Review unavailable.")
+    conditions = rev.get("blocking_findings")
+    if isinstance(conditions, list) and all(isinstance(x, str) for x in conditions):
+        text += "\n\n## Required changes\n\n" + "\n".join(conditions)
+    text += "\n\n## Recorded validation evidence (session-reported)\n\n"
+    text += json.dumps(validations, indent=2) + "\n"
+    text += "\n" + "\n".join(rev.get("review_notes") or []) + "\n"
+    _write_text(path, text)
+    _write_text(Path(cfg.reviews_dir) / f"{iid}.md", text)
+    status = "failed" if rev.get("ok") is False else rev.get("review_status", "unknown")
+    record = {"schema_version": 1, "record_id": stem,
+              "finished_at": datetime.now(timezone.utc).isoformat(), "branch_sha": sha,
+              "runner_outcome": {"done": "completed", "failed": "failed", "limit": "failed"}.get(kind, "incomplete"),
+              "review_status": status, "blocking_findings": rev.get("blocking_findings", [] if rev.get("ok") is False else None),
+              "required_validations": required, "validations": validations,
+              "source_record": os.path.relpath(path, cfg.state_dir)}
+    _write_json(Path(cfg.reviews_dir) / f"{stem}.inputs.json", record)
+    derived = readiness.evaluate(record, branch_sha=sha, state_dir=cfg.state_dir)
+    _write_json(Path(cfg.reviews_dir) / f"{stem}.readiness.json", derived)
+    return derived
+
+
+READINESS_LABELS = {"ready": "Ready for your review", "changes_requested": "Changes requested",
+                    "failed": "Review or checks failed", "unknown": "Review readiness unknown"}
+
+
+def _valid_item_id(iid: object) -> bool:
+    return isinstance(iid, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", iid) is not None and ".." not in iid
+
+
+def _review_readiness(cfg: Config, item: dict) -> dict:
+    if not _valid_item_id(item.get("id")):
+        return {**readiness.select([None], branch_sha="", state_dir=cfg.state_dir), "review_path": None}
+    rp, br = repo_path(cfg, item.get("repo")), item.get("branch")
+    sha = git(rp, "rev-parse", "--verify", f"refs/heads/{br}^{{commit}}", check=False).strip() if rp and br else ""
+    suffix = f"-{item['id']}.json"
+    runs = [p for p in Path(cfg.runs_dir).glob("*.json") if p.name.endswith(suffix)]
+    records = []
+    try:
+        # Run timestamps are runner-assigned. A newest unfinished attempt must not
+        # reuse a clean older review, even if the branch SHA has not changed.
+        runs.sort(key=lambda p: _run_started_at(p, suffix))
+        for run in runs:
+            path = Path(cfg.reviews_dir) / f"{run.stem}.inputs.json"
+            if not path.exists() and run == runs[-1]:
+                records.append(None)
+                continue
+            if not path.exists():
+                continue  # legacy history without structured inputs
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = None
+            started_at = _run_started_at(run, suffix)
+            finished_at = readiness._utc_rfc3339(record.get("finished_at")) if isinstance(record, dict) else None
+            if (not isinstance(record, dict) or record.get("record_id") != run.stem
+                    or finished_at is None or finished_at < started_at):
+                # Bind evidence to its attempt. A copied or backdated record is
+                # damaged history, never proof that this newer attempt completed.
+                record = {"record_id": run.stem, "branch_sha": "",
+                          "finished_at": started_at.isoformat()}
+            records.append(record)
+        result = readiness.select(records, branch_sha=sha, state_dir=cfg.state_dir)
+    except (OSError, ValueError, TypeError):
+        result = readiness.select([None], branch_sha=sha, state_dir=cfg.state_dir)
+    # A legacy full review remains accessible, but cannot establish readiness.
+    legacy = Path(cfg.reviews_dir) / f"{item['id']}.md"
+    result["review_path"] = (os.path.join(cfg.state_dir, result["evidence_path"])
+                             if result.get("evidence_path") else str(legacy) if legacy.is_file() else None)
+    return result
+
+
+def _readiness_lines(info: dict, *, indent: str = "") -> list[str]:
+    lines = [f"{indent}- readiness: **{READINESS_LABELS[info['status']]}**"]
+    lines += [f"{indent}  - {reason}" for reason in info["reasons"]]
+    if info.get("review_path"):
+        lines.append(f"{indent}- full review: [{info['review_path']}]({info['review_path']})")
+    return lines
 
 
 def journal(cfg: Config, repo: str, branch: str, sha: str, action: str) -> None:
@@ -729,6 +899,10 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
     item, iid = p.item, str(p.item["id"])
     result = {"id": iid, "status": "open", "note": "", "branch": "", "council": "", "cost": 0.0, "session": ""}
     started = time.monotonic()
+    if not _valid_item_id(iid):
+        result.update(status="held", note="runner: invalid item ID; use a simple filename without path separators or traversal")
+        _apply(cfg, result)
+        return result
     ensure_state(cfg)
     if not (os.path.exists(cfg.settings_path) and os.path.exists(cfg.mcp_path)):
         write_session_settings(cfg)
@@ -744,16 +918,23 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         _apply(cfg, result)
         return result
     try:
+        # Capture the declared checks before the session can do any work.
+        required = json.loads(json.dumps(item.get("required_validations")))
+        stem = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S.%fZ") + f"-{iid}"
+        run_path = Path(cfg.runs_dir) / f"{stem}.json"
+        # cmd_work holds RunLock; exclusive creation also prevents overwriting
+        # evidence if a caller bypasses that lock or the clock repeats.
+        with run_path.open("x", encoding="utf-8") as fh:
+            json.dump({"started_at": now_stamp(), "required_validations": required}, fh)
         env = scrubbed_env(p.repo, tool_path_dirs())
         prompt = compose_prompt(item, repo_name=os.path.basename(p.repo), worktree=p.worktree,
                                 branch=p.branch, base=p.base, minutes=max(5, cfg.item_timeout // 60 - 5))
         log(f"  session: {p.branch} in {p.worktree} (timeout {cfg.item_timeout}s)")
         run = run_session(cfg, prompt, cwd=p.worktree, env=env, timeout=cfg.item_timeout)
-        stamp = now_stamp().replace(":", "")
-        with open(os.path.join(cfg.runs_dir, f"{stamp}-{iid}.json"), "w") as fh:
-            json.dump({"argv_note": "claude -p (json)", "rc": run["rc"], "timed_out": run["timed_out"],
-                       "data": run["data"], "stderr": run["stderr"][-20000:],
-                       "stdout_tail": run["stdout"][-20000:] if run["data"] is None else ""}, fh, indent=1)
+        _write_json(run_path, {"argv_note": "claude -p (json)", "rc": run["rc"],
+                    "timed_out": run["timed_out"], "required_validations": required,
+                    "data": run["data"], "stderr": run["stderr"][-20000:],
+                    "stdout_tail": run["stdout"][-20000:] if run["data"] is None else ""})
         data = run["data"] or {}
         result["session"] = str(data.get("session_id") or "")
         try:
@@ -813,7 +994,7 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
                 result.update(status="held", note=f"runner: HELD (no changes) — {why}{steps}{denial_note}{tail}")
         elif kind == "nomarker":
             if has_diff:
-                result.update(status="in_review", branch=p.branch, note=f"runner: {why}; branch has changes, treating as done.{denial_note}{tail}")
+                result.update(status="in_review", branch=p.branch, note=f"runner: {why}; branch has changes, completion is unknown.{denial_note}{tail}")
             else:
                 result.update(status="held", note=f"runner: {why} and produced no changes.{denial_note}{tail}")
         else:  # done
@@ -826,16 +1007,27 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         # C3: every branch that carries work is reviewed — held ones too, so a partial
         # branch you later decide to take has a verdict on record.
         if result.get("branch"):
-            diff_text = git(p.repo, "diff", f"{p.base}...{p.branch}", check=False)
+            sha = git(p.repo, "rev-parse", p.branch).strip()
+            validations = _capture_validations(cfg, stem, final_text)
+            diff_text = git(p.repo, "diff", f"{p.base}...{p.branch}")
+            review_input = diff_text + "\n\nRunner outcome: " + kind
+            review_input += "\nRequired validations: " + json.dumps(required)
+            review_input += "\nSession-reported validation evidence:\n" + final_text
             if reviewer is False:
-                result["council"] = "review skipped (--no-council)"
+                rev = {"ok": True, "summary": "review skipped (--no-council)", "review_status": "unknown", "blocking_findings": []}
             else:
                 log("  council review ...")
-                rev = reviewer(cfg, diff_text, item_id=iid)
-                result["council"] = rev["summary"]
-                if rev.get("markdown"):
-                    with open(os.path.join(cfg.reviews_dir, f"{iid}.md"), "w") as fh:
-                        fh.write(f"# council review — {iid} — {now_stamp()}\n\n{rev['markdown']}\n")
+                try:
+                    rev = reviewer(cfg, review_input, item_id=iid)
+                    if not isinstance(rev, dict):
+                        raise ValueError("reviewer did not return an object")
+                except Exception as exc:  # a failed reviewer still leaves a reviewable branch
+                    rev = {"ok": False, "summary": f"REVIEW FAILED: {type(exc).__name__}: {exc}"}
+            result["council"] = str(rev.get("summary") or "Review unavailable.")
+            result["review_readiness"] = _save_review(
+                cfg, iid=iid, stem=stem, sha=sha, kind=kind, required=required,
+                validations=validations, rev=rev)
+            result["review_readiness"]["review_path"] = str(Path(cfg.reviews_dir) / f"{stem}.md")
     except Exception as e:  # noqa: BLE001 — fail closed per item
         result.update(status="held", note=f"runner: internal error: {type(e).__name__}: {str(e)[:300]}")
         if git_ok(p.repo, "rev-list", "--count", f"{p.base}..{p.branch}") and \
@@ -975,8 +1167,12 @@ def summarize_run(results: list[dict], *, limit_hit: bool = False) -> str:
         line = f"- {tag} {r['id']}"
         if r.get("cost"):
             line += f" (${r['cost']:.2f})"
-        if r.get("council"):
-            line += f"\n  council: {r['council'][:220]}"
+        if r.get("review_readiness"):
+            info = r["review_readiness"]
+            line += f"\n  {READINESS_LABELS[info['status']]}"
+            line += f"\n  Full evidence and conditions: backlog-run show {r['id']}"
+        elif r.get("council"):
+            line += f"\n  Review readiness unknown; inspect: backlog-run show {r['id']}"
         elif r.get("note"):
             line += f"\n  {r['note'][:220]}"
         lines.append(line)
@@ -1012,27 +1208,40 @@ def write_report(cfg: Config) -> str:
     lines = [f"# backlog-run morning report — {now_stamp()}", "",
              f"{len(review)} awaiting your review · {len(held)} held · {len(opens)} open", ""]
     mapping = {}
+    review_metadata = {}
     if review:
-        lines.append("## Awaiting review (approve = merge + push + delete branch; drop = delete branch)")
+        lines.append("## Awaiting review (readiness is evidence, not merge approval)")
         lines.append("")
     for n, it in enumerate(review, 1):
         mapping[str(n)] = it["id"]
         lines.append(f"### {n}. {it.get('title')}")
         lines.append(f"- id: `{it['id']}`  repo: `{it.get('repo')}`  branch: `{it.get('branch')}`  worked: {it.get('worked')}")
         lines.append(f"- diff: {_diff_stat(cfg, it)}")
+        info = _review_readiness(cfg, it)
+        review_metadata[it["id"]] = info
+        lines.extend(_readiness_lines(info))
         if it.get("note"):
             lines.append(f"- note: {it['note']}")
         if it.get("council"):
             lines.append(f"- council: {it['council']}")
         if it.get("session"):
             lines.append(f"- session: `{it['session']}`  cost: ${it.get('cost_usd', 0)}")
-        lines.append(f"- `backlog-run show {n}` · `backlog-run diff {n}` · `backlog-run approve {n}` · `backlog-run drop {n}`")
+        actions = f"- `backlog-run show {n}` · `backlog-run diff {n}`"
+        if info["status"] == "ready":
+            actions += f" · after your review: `backlog-run approve {n}`"
+        else:
+            actions += " · resolve or inspect the evidence above before deciding"
+        lines.append(actions + f" · `backlog-run drop {n}`")
         lines.append("")
     if held:
         lines.append("## Held (needs you)")
         for it in held:
             br = f"  branch `{it['branch']}`" if it.get("branch") else ""
             lines.append(f"- `{it['id']}` — {it.get('title')}{br}")
+            if it.get("branch"):
+                info = _review_readiness(cfg, it)
+                review_metadata[it["id"]] = info
+                lines.extend(_readiness_lines(info, indent="  "))
             if it.get("note"):
                 lines.append(f"  - {it['note']}")
         lines.append("")
@@ -1041,11 +1250,12 @@ def write_report(cfg: Config) -> str:
         lines.append(f"- `{it['id']}` ({it.get('repo')}) — {it.get('title')}")
     lines.append("")
     lines.append("Numbers refer to this report; ids always work. `backlog-run reopen <id>` returns a held item to the queue.")
+    lines.append("Readiness does not change your authority. `approve <id>` still merges + pushes + deletes the branch; held items require `--held`.")
     text = "\n".join(lines)
     with open(cfg.report_path, "w") as fh:
         fh.write(text + "\n")
-    with open(cfg.report_json, "w") as fh:
-        json.dump({"written": now_stamp(), "numbers": mapping}, fh, indent=1)
+    _write_json(cfg.report_json, {"written": now_stamp(), "numbers": mapping,
+                                  "review_readiness": review_metadata})
     return text
 
 
@@ -1089,8 +1299,10 @@ def cmd_show(args, cfg: Config) -> int:
         print(f"{k}: {v}")
     print(f"diff: {_diff_stat(cfg, it)}")
     print("\n--- prompt ---\n" + str(it.get("prompt") or "").rstrip())
-    rev = os.path.join(cfg.reviews_dir, f"{iid}.md")
-    if os.path.exists(rev):
+    info = _review_readiness(cfg, it)
+    print("\n" + "\n".join(_readiness_lines(info)))
+    rev = info.get("review_path")
+    if rev and os.path.exists(rev):
         print("\n--- council review ---")
         with open(rev) as fh:
             sys.stdout.write(fh.read())
