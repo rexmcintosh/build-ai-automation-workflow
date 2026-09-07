@@ -9,7 +9,9 @@ Run this golden set before tagging a council release. The expected result for al
 | `aris-pr1` | aris-management-website PR 1 | `489b60706923e0cc9bdc529863e3b932c51e459f` | `0595eaf9fc58ed3abb7ec2311c2b649fd6130463` | no context, full-file context |
 | `stw-pr11` | swimtrack-website PR 11 | `95c87b723454e7f88dffa241d6cb6a5d40de5e6a` | `eba8b54037228994c883f5559ae9b24c3316954b` | no context, full-file context |
 
-Each fixture commits its text diff, the relevant text files from the fixed head, and a manifest with SHA-256 and byte-size evidence. Context gathering reads changed text files and the root anchors `package.json`, `.gitignore`, and `.nvmrc` when present. It caps each file at 40,000 bytes and the full context at 160,000 bytes. Binary files are not added to full-file context.
+Each fixture commits its text diff, the relevant text files from the fixed head, and a manifest with SHA-256 and byte-size evidence. `.gitattributes` marks every fixture path as `-text`, so Git does not rewrite hashed bytes when `core.autocrlf` is enabled. The diff-specific whitespace exemption remains because unified diffs require blank context markers.
+
+Context gathering reads changed text files and the root anchors `package.json`, `.gitignore`, and `.nvmrc` when present. It caps each file at 40,000 bytes and the full context at 160,000 bytes. Binary files are not added to full-file context.
 
 ## Zero-cost validation
 
@@ -38,5 +40,9 @@ The coordinator creates a temporary venv, verifies that `council-v0.4.0` still r
 Without a transport hook, the runner resolves `VENICE_COUNCIL_KEY`, then `VENICE_API_KEY`, first from the environment and then from assignment lines in `~/.env`. It never prints the key. A transport hook may enforce its own credential policy, but the pinned client still requires one of those variables.
 
 The JSON evidence stores the pinned version, fixture base and head, grounding arm, complete review body, blocking count, unavailable flag, exception text, and final verdict. A blocking mismatch, unavailable review, or exception fails the full run. Exceptions do not stop later cells, so a failed run still records all four cells.
+
+Bootstrap failures also write a failing JSON artifact. Worker setup failures, including key resolution, transport loading, or pinned-package mismatch, mark all four cells failed. Venv and pip failures write a top-level environment error. Exact known credential values are redacted from stored errors; if credential lookup or exception formatting fails, error details are omitted. This is not a general detector for encoded or partial secrets. If a worker exits before it can write evidence, the coordinator replaces missing, stale, malformed, or successful prior output with a worker-startup failure artifact.
+
+Evidence writes use a temporary file and rename. Use a different `--output` path for each concurrent run; shared output paths are not supported.
 
 The original 2026-07-23 session scratchpad and response bodies were reaped. The result table in `docs/council-regression-2026-07-23.md` is the surviving record of that run. New result JSON belongs under `tools/regress/results/`, which is ignored except for its placeholder.

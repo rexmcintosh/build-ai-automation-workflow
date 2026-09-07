@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import importlib.metadata
 import importlib.util
+import json
 from importlib.resources import files
 import os
 import math
@@ -98,37 +99,39 @@ def _build_client(settings, transport_hook):
     )
 
 
-def worker(*, output: Path, transport_hook: str | None) -> int:
-    fixtures = harness.load_fixtures(FIXTURES)
-    _validate_golden_set(fixtures)
-    settings, panels, run_pr_review = _load_pinned_council()
-    client = _build_client(settings, transport_hook)
-    records: list[dict] = []
-    for case in harness.build_run_matrix(fixtures):
-        fixture = case.fixture
-        record = {
-            "fixture": fixture.fixture_id,
-            "grounding": case.grounding,
-            "repo": fixture.repo,
-            "pr": fixture.pr,
-            "base": fixture.base,
-            "head": fixture.head,
-            "expected_blocking": fixture.expected_blocking,
-            "blocking": None,
-            "unavailable": True,
-            "error": None,
-            "body": "",
-        }
-        try:
-            context = harness.gather_file_context(fixture) if case.grounding == "full-file-context" else ""
-            body, blocking, unavailable = run_pr_review(
-                fixture.diff_path.read_text(), panels, client,
-                chair_model=getattr(settings, "chair_model", ""), file_context=context,
-            )
-            record.update(body=body, blocking=blocking, unavailable=unavailable)
-        except Exception as exc:  # Preserve all four cells and fail closed.
-            record["error"] = f"{type(exc).__name__}: {exc}"
-        records.append(record)
+def _safe_error(exc: Exception) -> str:
+    try:
+        message = f"{type(exc).__name__}: {exc}"
+        secrets = [os.environ.get("VENICE_COUNCIL_KEY"), os.environ.get("VENICE_API_KEY")]
+        env_file = Path.home() / ".env"
+        secrets.extend(_env_assignment(env_file, name) for name in ("VENICE_COUNCIL_KEY", "VENICE_API_KEY"))
+        for secret in secrets:
+            if secret:
+                message = message.replace(secret, "<redacted>")
+        return message
+    except Exception:
+        # Never return unredacted details when credential lookup or formatting fails.
+        return f"{type(exc).__name__}: details omitted because credential redaction failed"
+
+
+def _base_record(case, error: str | None = None) -> dict:
+    fixture = case.fixture
+    return {
+        "fixture": fixture.fixture_id,
+        "grounding": case.grounding,
+        "repo": fixture.repo,
+        "pr": fixture.pr,
+        "base": fixture.base,
+        "head": fixture.head,
+        "expected_blocking": fixture.expected_blocking,
+        "blocking": None,
+        "unavailable": True,
+        "error": error,
+        "body": "",
+    }
+
+
+def _result_payload(records: list[dict], bootstrap_error: dict | None = None) -> dict:
     grade = harness.grade_records(records)
     payload = {
         "schema_version": 1,
@@ -139,9 +142,45 @@ def worker(*, output: Path, transport_hook: str | None) -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "claim": "single stochastic regression detection run; not effect estimation",
         "estimated_api_calls": ESTIMATED_API_CALLS,
-        "verdict": grade["verdict"],
+        "verdict": "fail" if bootstrap_error else grade["verdict"],
         "runs": records,
     }
+    if bootstrap_error:
+        payload["bootstrap_error"] = bootstrap_error
+    return payload
+
+
+def _write_bootstrap_failure(output: Path, phase: str, exc: Exception, fixtures=()) -> None:
+    error = _safe_error(exc)
+    records = [_base_record(case, error) for case in harness.build_run_matrix(fixtures)]
+    harness.write_evidence(output, _result_payload(records, {"phase": phase, "error": error}))
+
+def worker(*, output: Path, transport_hook: str | None) -> int:
+    fixtures = []
+    try:
+        fixtures = harness.load_fixtures(FIXTURES)
+        _validate_golden_set(fixtures)
+        settings, panels, run_pr_review = _load_pinned_council()
+        client = _build_client(settings, transport_hook)
+    except Exception as exc:
+        _write_bootstrap_failure(output, "worker-bootstrap", exc, fixtures)
+        return 1
+
+    records: list[dict] = []
+    for case in harness.build_run_matrix(fixtures):
+        fixture = case.fixture
+        record = _base_record(case)
+        try:
+            context = harness.gather_file_context(fixture) if case.grounding == "full-file-context" else ""
+            body, blocking, unavailable = run_pr_review(
+                fixture.diff_path.read_text(), panels, client,
+                chair_model=getattr(settings, "chair_model", ""), file_context=context,
+            )
+            record.update(body=body, blocking=blocking, unavailable=unavailable)
+        except Exception as exc:  # Preserve all four cells and fail closed.
+            record["error"] = _safe_error(exc)
+        records.append(record)
+    payload = _result_payload(records)
     harness.write_evidence(output, payload)
     return 0 if payload["verdict"] == "pass" else 1
 
@@ -237,9 +276,31 @@ def main(argv: list[str] | None = None) -> int:
         "operator estimate, not a billing cap. This is one stochastic run."
     )
     sys.stdout.flush()
-    return install_and_run(
-        output=args.output, transport_hook=args.transport_hook, estimate_diem=args.estimate_diem
-    )
+    previous_evidence = args.output.read_bytes() if args.output.is_file() else None
+    try:
+        exit_code = install_and_run(
+            output=args.output, transport_hook=args.transport_hook, estimate_diem=args.estimate_diem
+        )
+    except Exception as exc:
+        _write_bootstrap_failure(args.output, "environment-bootstrap", exc)
+        print("error: paid-run environment bootstrap failed; see JSON evidence", file=sys.stderr)
+        return 1
+    if exit_code:
+        try:
+            current_evidence = args.output.read_bytes()
+            payload = json.loads(current_evidence)
+            has_new_failure = (
+                current_evidence != previous_evidence
+                and isinstance(payload, dict)
+                and payload.get("verdict") == "fail"
+            )
+        except (OSError, ValueError, TypeError):
+            has_new_failure = False
+        if not has_new_failure:
+            _write_bootstrap_failure(
+                args.output, "worker-startup", RuntimeError(f"worker exited with status {exit_code}")
+            )
+    return exit_code
 
 
 if __name__ == "__main__":

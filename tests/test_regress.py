@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -250,12 +252,17 @@ def test_worker_paid_still_requires_operator_estimate(monkeypatch, tmp_path, cap
 
 def test_worker_rejects_changed_fixture_set_before_loading_council(monkeypatch, tmp_path):
     loaded = []
+    output = tmp_path / "evidence.json"
     monkeypatch.setattr(harness, "load_fixtures", lambda path: [])
     monkeypatch.setattr(run, "_load_pinned_council", lambda: loaded.append(True))
 
-    with pytest.raises(ValueError, match="expected fixtures"):
-        run.worker(output=tmp_path / "evidence.json", transport_hook=None)
+    exit_code = run.worker(output=output, transport_hook=None)
 
+    payload = json.loads(output.read_text())
+    assert exit_code == 1
+    assert payload["verdict"] == "fail"
+    assert payload["bootstrap_error"]["phase"] == "worker-bootstrap"
+    assert "expected fixtures" in payload["bootstrap_error"]["error"]
     assert loaded == []
 
 
@@ -311,3 +318,132 @@ def test_fresh_environment_installs_recorded_commit_not_a_movable_tag(monkeypatc
     assert result == 0
     installed_source = next(command[-1] for command in invocations if "pip" in command)
     assert installed_source.endswith("@" + run.PINNED_COMMIT)
+
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="fixture checkout validation requires git")
+def test_fixture_attributes_preserve_bytes_with_autocrlf_checkout(tmp_path):
+    source = tmp_path / "source"
+    checkout = tmp_path / "checkout"
+    source.mkdir()
+    shutil.copy(Path(__file__).parents[1] / ".gitattributes", source / ".gitattributes")
+    fixture_source = FIXTURES / "stw-pr11"
+    fixture_copy = source / "tools" / "regress" / "fixtures" / "stw-pr11"
+    shutil.copytree(fixture_source, fixture_copy)
+    expected = {
+        path.relative_to(source): path.read_bytes()
+        for path in fixture_copy.rglob("*")
+        if path.is_file()
+    }
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture Test"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "clone", "-qn", str(source), str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "core.autocrlf", "true"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "checkout", "-q"], check=True)
+
+    for relative, original_bytes in expected.items():
+        assert (checkout / relative).read_bytes() == original_bytes, relative
+    fixtures = harness.load_fixtures(checkout / "tools" / "regress" / "fixtures")
+    harness.validate_fixture(fixtures[0])
+
+
+def test_worker_bootstrap_failure_writes_four_redacted_failures(monkeypatch, tmp_path):
+    output = tmp_path / "bootstrap.json"
+    secret = "test-secret-must-not-appear"
+    monkeypatch.setenv("VENICE_COUNCIL_KEY", secret)
+    monkeypatch.setattr(
+        run,
+        "_load_pinned_council",
+        lambda: (_ for _ in ()).throw(RuntimeError(f"bad client {secret}")),
+    )
+
+    exit_code = run.worker(output=output, transport_hook=None)
+
+    raw = output.read_text()
+    payload = json.loads(raw)
+    assert exit_code == 1
+    assert payload["verdict"] == "fail"
+    assert payload["bootstrap_error"]["phase"] == "worker-bootstrap"
+    assert secret not in raw
+    assert len(payload["runs"]) == 4
+    assert all(item["status"] == "fail" and item["error"] for item in payload["runs"])
+
+
+def test_coordinator_bootstrap_failure_writes_json_and_returns_nonzero(monkeypatch, tmp_path):
+    output = tmp_path / "coordinator.json"
+    monkeypatch.setattr(
+        run,
+        "install_and_run",
+        lambda **kwargs: (_ for _ in ()).throw(subprocess.CalledProcessError(1, ["pip"])),
+    )
+
+    exit_code = run.main([
+        "--paid", "--estimate-diem", "4", "--output", str(output)
+    ])
+
+    payload = json.loads(output.read_text())
+    assert exit_code == 1
+    assert payload["verdict"] == "fail"
+    assert payload["bootstrap_error"]["phase"] == "environment-bootstrap"
+    assert payload["runs"] == []
+
+
+def test_missing_worker_evidence_is_replaced_with_failure_json(monkeypatch, tmp_path):
+    output = tmp_path / "missing-worker.json"
+    output.write_text(json.dumps({"verdict": "pass", "runs": []}))
+    monkeypatch.setattr(run, "install_and_run", lambda **kwargs: 2)
+
+    exit_code = run.main([
+        "--paid", "--estimate-diem", "4", "--output", str(output)
+    ])
+
+    payload = json.loads(output.read_text())
+    assert exit_code == 2
+    assert payload["verdict"] == "fail"
+    assert payload["bootstrap_error"]["phase"] == "worker-startup"
+
+
+@pytest.mark.parametrize("malformed", ["[]", "null", "42", "not json"])
+def test_malformed_worker_evidence_is_replaced_with_failure_json(monkeypatch, tmp_path, malformed):
+    output = tmp_path / "malformed-worker.json"
+
+    def failed_worker(**kwargs):
+        output.write_text(malformed)
+        return 2
+
+    monkeypatch.setattr(run, "install_and_run", failed_worker)
+    assert run.main(["--paid", "--estimate-diem", "4", "--output", str(output)]) == 2
+    payload = json.loads(output.read_text())
+    assert payload["verdict"] == "fail"
+    assert payload["bootstrap_error"]["phase"] == "worker-startup"
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("lookup failed"), OSError("unreadable key file")])
+def test_redaction_failure_omits_exception_details(monkeypatch, failure):
+    def broken_lookup(*args):
+        raise failure
+
+    monkeypatch.setattr(run, "_env_assignment", broken_lookup)
+    error = run._safe_error(RuntimeError("private credential must not be emitted"))
+    assert "private credential" not in error
+    assert "details omitted" in error
+
+
+def test_exception_with_broken_string_still_produces_failure_evidence(monkeypatch, tmp_path):
+    class BrokenError(Exception):
+        def __str__(self):
+            raise RuntimeError("broken formatter")
+
+    def broken_load():
+        raise BrokenError()
+
+    monkeypatch.setattr(run, "_load_pinned_council", broken_load)
+    output = tmp_path / "broken-error.json"
+    assert run.worker(output=output, transport_hook=None) == 1
+    payload = json.loads(output.read_text())
+    assert payload["verdict"] == "fail"
+    assert "BrokenError" in payload["bootstrap_error"]["error"]
+    assert "details omitted" in payload["bootstrap_error"]["error"]
