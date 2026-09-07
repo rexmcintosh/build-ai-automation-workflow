@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from tools.regress import harness
+from tools.regress import run
+
+
+FIXTURES = Path(__file__).parents[1] / "tools" / "regress" / "fixtures"
+
+
+def test_committed_fixtures_are_complete_and_match_their_manifest():
+    fixtures = harness.load_fixtures(FIXTURES)
+
+    assert [fixture.fixture_id for fixture in fixtures] == ["aris-pr1", "stw-pr11"]
+    assert all(fixture.expected_blocking == 0 for fixture in fixtures)
+    assert all(len(fixture.base) == 40 and len(fixture.head) == 40 for fixture in fixtures)
+    for fixture in fixtures:
+        harness.validate_fixture(fixture)
+
+
+def test_context_uses_fixed_head_files_and_required_anchors():
+    fixtures = {fixture.fixture_id: fixture for fixture in harness.load_fixtures(FIXTURES)}
+
+    aris = harness.gather_file_context(fixtures["aris-pr1"])
+    assert "--- src/pages/work.astro ---" in aris
+    assert "widths={[672, 1008, 1344]}" in aris
+    assert "--- package.json ---" in aris
+    assert "--- .gitignore ---" in aris
+    assert "--- .nvmrc ---" in aris
+
+    swimtrack = harness.gather_file_context(fixtures["stw-pr11"])
+    assert "--- tools/i18n/translate.mjs ---" in swimtrack
+    assert "process.loadEnvFile(path)" in swimtrack
+    assert '"node": ">=22.12.0"' in swimtrack
+    assert "--- .gitignore ---" in swimtrack
+    assert "--- .nvmrc ---" not in swimtrack
+
+
+def test_context_caps_each_file_and_the_total(tmp_path):
+    fixture_dir = tmp_path / "fixture"
+    (fixture_dir / "head" / "src").mkdir(parents=True)
+    (fixture_dir / "head" / "src" / "large.py").write_text("x" * 50_000)
+    (fixture_dir / "head" / "package.json").write_text("y" * 50_000)
+    (fixture_dir / "change.diff").write_text(
+        "diff --git a/src/large.py b/src/large.py\n"
+        "--- a/src/large.py\n+++ b/src/large.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    harness.write_manifest(
+        fixture_dir,
+        fixture_id="synthetic",
+        repo="example.invalid/repo",
+        pr=1,
+        base="a" * 40,
+        head="b" * 40,
+        expected_blocking=0,
+    )
+    fixture = harness.load_fixture(fixture_dir)
+
+    context = harness.gather_file_context(fixture, per_file_cap=40_000, total_cap=60_000)
+
+    assert len(context.encode()) <= 60_000
+    assert context.count("x") <= 40_000
+    assert context.count("y") <= 40_000
+
+
+def test_run_matrix_has_grounded_and_ungrounded_arm_for_each_fixture():
+    fixtures = harness.load_fixtures(FIXTURES)
+
+    matrix = harness.build_run_matrix(fixtures)
+
+    assert [(case.fixture.fixture_id, case.grounding) for case in matrix] == [
+        ("aris-pr1", "none"),
+        ("aris-pr1", "full-file-context"),
+        ("stw-pr11", "none"),
+        ("stw-pr11", "full-file-context"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("record", "expected_verdict"),
+    [
+        ({"blocking": 0, "unavailable": False, "error": None}, "pass"),
+        ({"blocking": 1, "unavailable": False, "error": None}, "fail"),
+        ({"blocking": 0, "unavailable": True, "error": None}, "fail"),
+        ({"blocking": 0, "unavailable": False, "error": "review failed"}, "fail"),
+    ],
+)
+def test_result_grading_fails_closed(record, expected_verdict):
+    result = harness.grade_records([record])
+
+    assert result["verdict"] == expected_verdict
+
+
+def test_dry_run_validates_without_install_or_review(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(run, "install_and_run", lambda *args, **kwargs: calls.append(args))
+    output = tmp_path / "dry-run.json"
+
+    exit_code = run.main(["--dry-run", "--output", str(output)])
+
+    assert exit_code == 0
+    assert calls == []
+    payload = json.loads(output.read_text())
+    assert payload["mode"] == "dry-run"
+    assert payload["estimated_api_calls"] == 16
+    assert payload["fixture_count"] == 2
+    assert "0 API calls" in capsys.readouterr().out
+
+
+def test_live_run_requires_explicit_paid_flag(tmp_path, capsys):
+    exit_code = run.main(["--output", str(tmp_path / "result.json")])
+
+    assert exit_code == 2
+    assert "--paid" in capsys.readouterr().err
+
+
+def test_paid_run_prints_estimate_before_starting(monkeypatch, tmp_path, capsys):
+    seen = []
+
+    def fake_install_and_run(**kwargs):
+        seen.append(capsys.readouterr().out)
+        Path(kwargs["output"]).write_text(json.dumps({"verdict": "pass", "runs": []}))
+        return 0
+
+    monkeypatch.setattr(run, "install_and_run", fake_install_and_run)
+
+    exit_code = run.main([
+        "--paid", "--estimate-diem", "4", "--output", str(tmp_path / "result.json")
+    ])
+
+    assert exit_code == 0
+    assert seen and "16 paid API calls" in seen[0]
+    assert "4.00 DIEM" in seen[0]
+    assert "operator estimate, not a billing cap" in seen[0]
+
+
+def test_worker_records_review_exception_and_fails_closed(monkeypatch, tmp_path):
+    output = tmp_path / "evidence.json"
+
+    def fail_review(*args, **kwargs):
+        raise RuntimeError("synthetic outage")
+
+    monkeypatch.setattr(run, "_load_pinned_council", lambda: (object(), object(), fail_review))
+    monkeypatch.setattr(run, "_build_client", lambda *args, **kwargs: object())
+
+    exit_code = run.worker(output=output, transport_hook=None)
+
+    payload = json.loads(output.read_text())
+    assert exit_code == 1
+    assert payload["verdict"] == "fail"
+    assert len(payload["runs"]) == 4
+    assert all(item["error"] == "RuntimeError: synthetic outage" for item in payload["runs"])
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {},
+        {"blocking": False, "unavailable": False, "error": None},
+        {"blocking": -1, "unavailable": False, "error": None},
+        {"blocking": 0, "unavailable": 0, "error": None},
+        {"blocking": 0, "unavailable": None, "error": None},
+    ],
+)
+def test_result_grading_rejects_malformed_records(record):
+    assert harness.grade_records([record])["verdict"] == "fail"
+
+
+def test_dry_run_rejects_an_empty_or_changed_golden_set(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(harness, "load_fixtures", lambda path: [])
+    called = []
+    monkeypatch.setattr(run, "install_and_run", lambda **kwargs: called.append(kwargs))
+
+    exit_code = run.main(["--dry-run", "--output", str(tmp_path / "evidence.json")])
+
+    assert exit_code == 1
+    assert called == []
+    assert "expected fixtures" in capsys.readouterr().err
+
+
+def test_worker_cli_requires_paid_and_never_runs_by_default(monkeypatch, tmp_path, capsys):
+    called = []
+    monkeypatch.setattr(run, "worker", lambda **kwargs: called.append(kwargs) or 0)
+
+    exit_code = run.main(["--_worker", "--output", str(tmp_path / "evidence.json")])
+
+    assert exit_code == 2
+    assert called == []
+    assert "--paid" in capsys.readouterr().err
+
+
+def test_dry_run_and_paid_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        run.main([
+            "--dry-run", "--paid", "--estimate-diem", "4",
+            "--output", str(tmp_path / "evidence.json"),
+        ])
+    assert exc.value.code == 2
+
+
+def test_paid_run_requires_positive_operator_estimate(monkeypatch, tmp_path, capsys):
+    called = []
+    monkeypatch.setattr(run, "install_and_run", lambda **kwargs: called.append(kwargs) or 0)
+
+    missing = run.main(["--paid", "--output", str(tmp_path / "missing.json")])
+    zero = run.main([
+        "--paid", "--estimate-diem", "0", "--output", str(tmp_path / "zero.json")
+    ])
+
+    assert missing == 2 and zero == 2
+    assert called == []
+    assert "--estimate-diem" in capsys.readouterr().err
+
+
+def test_pinned_council_loads_its_bundled_panels(monkeypatch):
+    import council.config
+
+    seen = []
+    monkeypatch.setattr(run.importlib.metadata, "version", lambda name: "0.4.0")
+    monkeypatch.setattr(
+        council.config,
+        "load_panels",
+        lambda path: (seen.append(Path(path)) or (object(), object())),
+    )
+
+    run._load_pinned_council()
+
+    assert len(seen) == 1
+    assert seen[0].name == "panels.toml"
+    assert seen[0].is_file()
+
+
+
+def test_worker_paid_still_requires_operator_estimate(monkeypatch, tmp_path, capsys):
+    called = []
+    monkeypatch.setattr(run, "worker", lambda **kwargs: called.append(kwargs) or 0)
+
+    exit_code = run.main([
+        "--_worker", "--paid", "--output", str(tmp_path / "evidence.json")
+    ])
+
+    assert exit_code == 2
+    assert called == []
+    assert "--estimate-diem" in capsys.readouterr().err
+
+
+def test_worker_rejects_changed_fixture_set_before_loading_council(monkeypatch, tmp_path):
+    loaded = []
+    monkeypatch.setattr(harness, "load_fixtures", lambda path: [])
+    monkeypatch.setattr(run, "_load_pinned_council", lambda: loaded.append(True))
+
+    with pytest.raises(ValueError, match="expected fixtures"):
+        run.worker(output=tmp_path / "evidence.json", transport_hook=None)
+
+    assert loaded == []
+
+
+def test_manifest_schema_and_integer_types_are_strict(tmp_path):
+    fixture_dir = tmp_path / "synthetic"
+    (fixture_dir / "head").mkdir(parents=True)
+    (fixture_dir / "change.diff").write_text(
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    harness.write_manifest(
+        fixture_dir,
+        fixture_id="synthetic",
+        repo="example.invalid/repo",
+        pr=1,
+        base="a" * 40,
+        head="b" * 40,
+        expected_blocking=0,
+    )
+    manifest = fixture_dir / "manifest.json"
+    payload = json.loads(manifest.read_text())
+    payload["schema_version"] = 2
+    payload["source"]["pr"] = True
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="manifest"):
+        harness.load_fixture(fixture_dir)
+
+
+@pytest.mark.parametrize("estimate", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("internal_worker", [False, True])
+def test_paid_rejects_nonfinite_estimates(monkeypatch, tmp_path, estimate, internal_worker):
+    called = []
+    monkeypatch.setattr(run, "install_and_run", lambda **kwargs: called.append(kwargs) or 0)
+    monkeypatch.setattr(run, "worker", lambda **kwargs: called.append(kwargs) or 0)
+    args = ["--paid", f"--estimate-diem={estimate}", "--output", str(tmp_path / "result.json")]
+    if internal_worker:
+        args.append("--_worker")
+    assert run.main(args) == 2
+    assert called == []
+
+
+def test_fresh_environment_installs_recorded_commit_not_a_movable_tag(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    invocations = []
+    monkeypatch.setattr(run.venv, "EnvBuilder", lambda **kwargs: SimpleNamespace(create=lambda path: None))
+
+    def fake_subprocess(command, **kwargs):
+        invocations.append(command)
+        return SimpleNamespace(returncode=0, stdout=run.PINNED_COMMIT + "\n")
+
+    monkeypatch.setattr(run.subprocess, "run", fake_subprocess)
+    result = run.install_and_run(output=tmp_path / "result.json", transport_hook=None, estimate_diem=4)
+    assert result == 0
+    installed_source = next(command[-1] for command in invocations if "pip" in command)
+    assert installed_source.endswith("@" + run.PINNED_COMMIT)

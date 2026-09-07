@@ -103,8 +103,11 @@ configuration — it passes today, but only on the strength of chair arbitration
 
 ## Reproduction
 
-Harness + runner + per-run JSON bodies: session scratchpad `regress/` (harness
-mirrors the swimtrack shim's context gathering; runner exports the council key
-from `~/.env` without printing it). Fixtures regenerate via `gh pr diff`; heads
-via `git fetch origin pull/<N>/head`. Cost of the full 6-run suite: 16 API calls,
-est. $0.72 ledger-priced, DIEM-covered (council key, usd-capped 0).
+The durable harness, fixture provenance, commands, and future JSON evidence
+format live in [`tools/regress/`](../tools/regress/README.md). Its `--dry-run`
+validates the committed fixed-head fixtures with zero API calls; a live run
+requires `--paid`, installs the pinned `council-v0.4.0` tag in a fresh venv, and
+runs both fixtures with and without full-file context. The original session
+scratchpad and its response bodies were reaped; the result table above is the
+surviving record of that 2026-07-23 run. The historical estimate for the four
+v0.4.0 cells remains 16 API calls and about 0.72 DIEM.

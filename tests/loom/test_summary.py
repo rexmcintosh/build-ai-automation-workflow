@@ -53,11 +53,12 @@ def test_build_summary_scrubs_secrets_in_items():
 
 
 def test_format_run_summary_from_absorb_dict():
-    d = {"committed": 2, "deferred": 1, "quarantined_learnings": 1,
+    d = {"committed": 2, "skipped_covered": 3, "deferred": 1, "quarantined_learnings": 1,
          "quarantined_items": [["s1#0", "sentinel hit"]],
          "shadow_commits": 5, "oldest_age_days": 9}
     s = format_run_summary(d)
-    assert "committed=2" in s and "s1#0" in s and "STALE" in s and "5 commits" in s
+    assert "committed=2" in s and "skipped_covered=3" in s
+    assert "s1#0" in s and "STALE" in s and "5 commits" in s
 
 
 def test_limit_hit_renders_paused_headline():
