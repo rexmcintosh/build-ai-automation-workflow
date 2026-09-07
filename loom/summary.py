@@ -44,8 +44,8 @@ def build_summary(counts: Dict[str, int], shadow_commits: int, oldest_age_days: 
 
 # "quarantined" counts SESSIONS whose transcript failed the secret gate;
 # "quarantined_learnings" counts individual learnings whose weave failed a guard.
-_COUNT_KEYS = ("distilled", "quarantined", "failed", "committed", "deferred",
-               "quarantined_learnings", "deadline_hit")
+_COUNT_KEYS = ("distilled", "quarantined", "failed", "committed", "skipped_covered",
+               "deferred", "quarantined_learnings", "deadline_hit")
 
 
 def format_run_summary(d: dict) -> str:

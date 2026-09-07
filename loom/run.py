@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional
 import yaml
 
 from .backends import get_backend
+from .coverage import is_learning_covered
 from .discovery import find_pending, is_loom_generated, session_id_for
 from .fingerprint import learning_id
 from .gate import scan_clean
@@ -123,8 +124,9 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
     # "quarantined" = SESSIONS whose transcript failed the secret gate.
     # "quarantined_learnings" = individual learnings whose weave failed a guard.
     summary = {"distilled": 0, "quarantined": 0, "failed": 0, "self_skipped": 0,
-               "committed": 0, "deferred": 0, "quarantined_learnings": 0,
-               "deadline_hit": False, "distill_deadline_hit": False, "limit_hit": False}
+               "committed": 0, "skipped_covered": 0, "deferred": 0,
+               "quarantined_learnings": 0, "deadline_hit": False,
+               "distill_deadline_hit": False, "limit_hit": False}
 
     start = time.monotonic()
     def _past(limit) -> bool:
@@ -232,6 +234,7 @@ def absorb(cfg: Config, shadow: bool = True, backend: str = "claude",
 
 def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, summary,
                expired: Callable[[], bool]):
+    summary.setdefault("skipped_covered", 0)
     repo = ShadowRepo(cfg.wiki_worktree, base="master")
     ledger = WeaveLedger(cfg.ledger_path)
     ledger.reconcile_from_git(repo.committed_ids())          # git is authoritative
@@ -297,7 +300,7 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
                     continue
                 ledger.plan(lid, route["target"], route["action"])
             entry = dict(learning)
-            entry.update(id=lid, target=route["target"],
+            entry.update(id=lid, target=route["target"], action=route["action"],
                          directory=route["target"].split("/", 1)[0])
             buckets.setdefault(route["target"], []).append(entry)
             dirs[route["target"]] = entry["directory"]
@@ -323,6 +326,38 @@ def _weave_all(cfg, state, backend_name, max_targets, max_per_target, today, sum
                 ledger.defer(entry["id"], "run deadline")
                 summary["deferred"] += 1
             continue
+
+        fresh = []
+        article = None
+        coverage_deadline_hit = False
+        for position, entry in enumerate(weave_now):
+            if entry["action"] == "update":
+                if expired():
+                    summary["deadline_hit"] = True
+                    for pending in fresh + weave_now[position:]:
+                        ledger.defer(pending["id"], "run deadline")
+                        summary["deferred"] += 1
+                    coverage_deadline_hit = True
+                    break
+                if article is None:
+                    article = repo.read(target) or ""
+                if is_learning_covered(be, entry["learning"], article):
+                    ledger.mark(entry["id"], "committed", reason="already-covered")
+                    summary["skipped_covered"] += 1
+                    continue
+            fresh.append(entry)
+        if coverage_deadline_hit:
+            continue
+        weave_now = fresh
+        if not weave_now:
+            continue
+        if expired():
+            summary["deadline_hit"] = True
+            for entry in weave_now:
+                ledger.defer(entry["id"], "run deadline")
+                summary["deferred"] += 1
+            continue
+
         try:
             res = weave_target(be, repo, ledger, target, dirs[target], weave_now,
                                today=today, roster=roster)
