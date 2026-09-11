@@ -4,6 +4,10 @@ import requests
 
 VENICE_API = "https://api.venice.ai/api/v1/chat/completions"
 
+# complete() needs to tell "caller said nothing" from "caller said 0", because 0
+# is the operator's kill switch for the output cap and must beat a client default.
+_UNSET = object()
+
 # Only these are worth retrying — a 4xx (bad model name, auth, bad request) will
 # fail identically every time, so retrying just burns time and billing.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -17,10 +21,16 @@ class VeniceClient:
     """Thin Venice chat client. `post` is injectable for tests."""
 
     def __init__(self, api_key, *, base_url=VENICE_API, timeout=180,
-                 retries=2, backoff=1.5, post=None, temperature=0.2):
+                 retries=2, backoff=1.5, post=None, temperature=0.2,
+                 max_completion_tokens=None):
         if not api_key:
             raise VeniceError("VENICE_API_KEY is not set")
         self.api_key = api_key
+        # Default output ceiling for every call this client makes, so no call
+        # site can be left unbounded by omission. Individual calls (the chair,
+        # the router, a per-seat override) pass their own. None or <= 0 sends
+        # nothing, which is Venice's own "use the model default".
+        self.max_completion_tokens = max_completion_tokens
         self.base_url = base_url
         self.timeout = timeout
         self.retries = retries
@@ -53,7 +63,8 @@ class VeniceClient:
         except Exception:
             pass
 
-    def complete(self, model, system, user, *, json_mode=True, task_type="chat"):
+    def complete(self, model, system, user, *, json_mode=True, task_type="chat",
+                 max_completion_tokens=_UNSET):
         payload = {
             "model": model,
             "messages": [
@@ -64,6 +75,15 @@ class VeniceClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        # `max_completion_tokens`, not `max_tokens`: Venice's OpenAPI spec
+        # (20260911.122036) marks max_tokens deprecated in favour of it, and
+        # defines it as the bound on "visible output tokens AND reasoning
+        # tokens" — every council seat is a reasoning model, so the reasoning
+        # half is the half that runs away.
+        cap = (self.max_completion_tokens if max_completion_tokens is _UNSET
+               else max_completion_tokens)
+        if cap is not None and int(cap) > 0:
+            payload["max_completion_tokens"] = int(cap)
         headers = {"Authorization": f"Bearer {self.api_key}",
                    "Content-Type": "application/json"}
         last = None

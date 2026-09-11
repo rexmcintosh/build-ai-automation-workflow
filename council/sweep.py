@@ -91,7 +91,7 @@ def _keep(f: Finding, min_conf: int) -> bool:
 
 
 def run_sweep(chunks, panel: Panel, client, *, chair_model: str,
-              min_conf: int = 7, max_workers=None) -> SweepReport:
+              min_conf: int = 7, max_workers=None, budget=None) -> SweepReport:
     """Run `panel` over each chunk, gate + dedup the findings, sort worst-first, and
     have the chair summarize. A chair failure surfaces in ``error`` but never drops
     the findings."""
@@ -102,7 +102,7 @@ def run_sweep(chunks, panel: Panel, client, *, chair_model: str,
     def _scan(chunk):
         label, text = chunk
         ctx = f"Security review of {label}. Find real, exploitable issues:\n\n{text}"
-        return label, run_panel(panel, ctx, client)
+        return label, run_panel(panel, ctx, client, budget=budget)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for label, results in pool.map(_scan, chunks):
@@ -121,7 +121,9 @@ def run_sweep(chunks, panel: Panel, client, *, chair_model: str,
     digest = "\n".join(f"- [{f.severity} c{f.confidence}] {f.point} "
                        f"(in {', '.join(f.locations)})" for f in findings)
     try:
-        d = loads_lenient(client.complete(chair_model, SWEEP_SUMMARY, digest))
+        d = loads_lenient(client.complete(
+            chair_model, SWEEP_SUMMARY, digest,
+            max_completion_tokens=budget.chair if budget else None))
         report.summary = str(d.get("summary", ""))
     except Exception as e:  # noqa: BLE001
         report.error = f"{type(e).__name__}: {e}"

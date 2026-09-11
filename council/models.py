@@ -7,6 +7,10 @@ class Member:
     name: str
     model: str
     system: str
+    # Optional per-seat output ceiling. A seat whose model reasons long (today
+    # openai-gpt-53-codex, 17,142 completion tokens at its ledger maximum against
+    # grok-4-3's 2,187) can be given its own headroom without raising the panel's.
+    max_completion_tokens: int | None = None
 
 
 @dataclass
@@ -15,6 +19,10 @@ class Panel:
     description: str
     members: list[Member]
     default_rigor: str = "daily"  # "daily" | "deep"
+    max_completion_tokens: int | None = None
+    chair_max_completion_tokens: int | None = None
+    # {"daily": {...}, "deep": {...}} — per-rigor overrides of the two above.
+    rigor: dict = field(default_factory=dict)
 
 
 @dataclass

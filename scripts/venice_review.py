@@ -182,9 +182,11 @@ def main() -> int:
     file_context = gather_file_context(
         diff, os.environ.get("GITHUB_WORKSPACE", "."), per_file_cap=file_cap)
     # temperature=0 on the gate path for run-to-run determinism (audit E3/B).
-    client = VeniceClient(get_api_key(), timeout=settings.timeout, temperature=0)
+    client = VeniceClient(get_api_key(), timeout=settings.timeout, temperature=0,
+                          max_completion_tokens=settings.max_completion_tokens)
     body, blocking, unavailable = run_pr_review(
-        diff, panels, client, chair_model=settings.chair_model, file_context=file_context)
+        diff, panels, client, chair_model=settings.chair_model, file_context=file_context,
+        settings=settings)
     upsert_comment(os.environ["REPO"], os.environ["PR_NUMBER"], body, os.environ["GITHUB_TOKEN"])
     if unavailable:
         print("::error::review council unavailable (code panel/chair failed) — failing closed",

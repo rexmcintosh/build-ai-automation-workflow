@@ -14,13 +14,15 @@ def _as_int(value, default: int = 5) -> int:
         return default
 
 
-def _ask_member(member: Member, context: str, client, *, task_type: str = "chat") -> MemberResult:
+def _ask_member(member: Member, context: str, client, *, task_type: str = "chat",
+                max_completion_tokens=None) -> MemberResult:
     try:
         raw = client.complete(
             member.model,
             member.system + "\n\n" + MEMBER_OUTPUT,
             f"Here is the input to weigh in on:\n\n{context}",
             task_type=task_type,
+            max_completion_tokens=max_completion_tokens,
         )
         data = loads_lenient(raw)
         findings = [
@@ -42,12 +44,14 @@ def _ask_member(member: Member, context: str, client, *, task_type: str = "chat"
 
 
 def run_panel(panel: Panel, context: str, client, *, max_workers=None,
-              task_type: str = "chat") -> list[MemberResult]:
+              task_type: str = "chat", budget=None) -> list[MemberResult]:
     # Cap concurrency so an oversized custom panel can't open a thread / rate-limit
     # storm; real panels are 3-4 seats so this is a safety bound, not a throttle.
     workers = max_workers or min(8, max(1, len(panel.members)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_ask_member, m, context, client, task_type=task_type): m
+        futures = {pool.submit(_ask_member, m, context, client, task_type=task_type,
+                               max_completion_tokens=(budget.member(m.name)
+                                                      if budget else None)): m
                   for m in panel.members}
         results = [f.result() for f in concurrent.futures.as_completed(futures)]
     order = [m.name for m in panel.members]
