@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from .ledger import append, query_rollup
+from .portable import export_jsonl, github_origin, ingest_jsonl
 
 def _cmd_log(a) -> int:
     try:
@@ -35,6 +36,50 @@ def _cmd_report(a) -> int:
         print("  ".join(c.ljust(widths[h]) for c, h in zip(cells, headers)))
     return 0
 
+def _cmd_export(a) -> int:
+    """Dump this machine's ledger to a portable JSONL file.
+
+    Built for the CI merge gate: the GitHub runner logs usage into a ledger it
+    then destroys, so the job exports here and the workflow keeps the file as a
+    build artifact. Best-effort like `log` — accounting must never be the reason
+    a merge gate fails — unless --strict is passed."""
+    try:
+        origin = {"id": a.origin_id} if a.origin_id else github_origin()
+        if not origin:
+            raise ValueError("no --origin-id and no GitHub Actions environment "
+                             "(GITHUB_REPOSITORY + GITHUB_RUN_ID) to derive one from")
+        n = export_jsonl(a.output, origin=origin, since=a.since, until=a.until)
+    except Exception as e:  # noqa: BLE001
+        # Non-strict is the CI default: a run whose usage we failed to capture is
+        # a lost row, not a bad merge. Say so loudly, exit 0.
+        level = "error" if a.strict else "warning"
+        print(f"venice-usage: {level}: export failed: {e}", file=sys.stderr)
+        return 2 if a.strict else 0
+    print(f"venice-usage: exported {n} row(s) to {a.output}", file=sys.stderr)
+    return 0
+
+
+def _cmd_ingest(a) -> int:
+    """Merge exported artifacts back into this machine's ledger. Idempotent by
+    ext_id, so re-downloading the same artifact cannot double-count spend."""
+    totals = {"files": 0, "rows": 0, "inserted": 0, "skipped": 0, "malformed": 0}
+    failures = []
+    for target in a.paths:
+        try:
+            for k, v in ingest_jsonl(target).items():
+                totals[k] += v
+        except (ValueError, OSError) as e:
+            failures.append(str(e))
+    if a.json:
+        print(json.dumps({**totals, "failures": failures}, indent=1))
+    else:
+        print("files={files} rows={rows} inserted={inserted} skipped={skipped} "
+              "malformed={malformed}".format(**totals))
+    for f in failures:
+        print(f"error: {f}", file=sys.stderr)
+    return 2 if failures else 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="venice-usage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -47,6 +92,17 @@ def main(argv=None) -> int:
     lg.add_argument("--usd", type=float, default=None)
     lg.add_argument("--source", default=None)
     lg.add_argument("--ts", default=None)
+    ex = sub.add_parser("export", help="dump the ledger to portable JSONL")
+    ex.add_argument("--output", required=True)
+    ex.add_argument("--origin-id", dest="origin_id", default=None,
+                    help="unique id for the producing run; defaults to the "
+                         "GitHub Actions repo/run/attempt when available")
+    ex.add_argument("--since"); ex.add_argument("--until")
+    ex.add_argument("--strict", action="store_true",
+                    help="exit 2 on failure instead of the best-effort 0")
+    ing = sub.add_parser("ingest", help="merge exported JSONL back into the ledger")
+    ing.add_argument("paths", nargs="+", help="export files, or directories of them")
+    ing.add_argument("--json", action="store_true")
     rp = sub.add_parser("report")
     rp.add_argument("--since"); rp.add_argument("--until"); rp.add_argument("--project")
     rp.add_argument("--group-by", default="project,task_type", dest="group_by")
@@ -68,7 +124,8 @@ def main(argv=None) -> int:
             print("venice-usage: log failed (ignored): bad arguments", file=sys.stderr)
             return 0
         raise
-    return _cmd_log(a) if a.cmd == "log" else _cmd_report(a)
+    return {"log": _cmd_log, "export": _cmd_export,
+            "ingest": _cmd_ingest, "report": _cmd_report}[a.cmd](a)
 
 if __name__ == "__main__":
     raise SystemExit(main())
