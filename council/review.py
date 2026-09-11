@@ -6,6 +6,7 @@ from .synthesize import synthesize
 from .render import render_combined
 from .prompts import REVIEW_SYNTH_OUTPUT
 from .gate import risk_tier, decide_blocking
+from .config import Settings, resolve_budget
 
 
 def _code_context(code_diff: str, file_context: str) -> str:
@@ -20,7 +21,8 @@ def _code_context(code_diff: str, file_context: str) -> str:
     return ctx
 
 
-def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_context: str = ""):
+def run_pr_review(diff: str, panels: dict, client, *, chair_model: str,
+                  file_context: str = "", settings=None):
     """Split a PR diff, review the code slice (gated) and the doc slice (advisory).
 
     Returns (body, blocking, unavailable):
@@ -34,7 +36,12 @@ def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_con
 
     file_context: optional full contents of the changed files, supplied by the CI shim
       from the checkout, so the panel and chair can verify findings (audit S1).
+    settings: optional council Settings, for the output ceilings. Omitting it is
+      normal — the per-repo shims predate the argument — and falls back to the
+      Settings class defaults, so an un-updated shim is still capped rather than
+      unbounded.
     """
+    settings = settings or Settings()
     code_diff, doc_diff = split_diff_by_type(diff)
     sections = []
     blocking = 0
@@ -42,9 +49,12 @@ def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_con
 
     if code_diff.strip():
         ctx = _code_context(code_diff, file_context)
-        results = run_panel(panels["code-review"], ctx, client, task_type="review")
+        panel = panels["code-review"]
+        budget = resolve_budget(settings, panel, panel.default_rigor)
+        results = run_panel(panel, ctx, client, task_type="review", budget=budget)
         syn = synthesize(ctx, results, client, chair_model=chair_model,
-                         system=REVIEW_SYNTH_OUTPUT, task_type="review")
+                         system=REVIEW_SYNTH_OUTPUT, task_type="review",
+                         max_completion_tokens=budget.chair)
         sections.append(("Code review (gate)", "", "Code changes", syn, results))
         tier = risk_tier(changed_paths(code_diff))
         blocking = decide_blocking(results, syn, tier=tier)
@@ -52,11 +62,14 @@ def run_pr_review(diff: str, panels: dict, client, *, chair_model: str, file_con
         unavailable = syn.error is not None or not results or errored * 2 >= len(results)
 
     if doc_diff.strip():
+        panel = panels["spec-review"]
+        budget = resolve_budget(settings, panel, panel.default_rigor)
         results = run_panel(
-            panels["spec-review"],
+            panel,
             f"Review this design doc / spec / plan diff:\n\n```diff\n{doc_diff}\n```", client,
-            task_type="review")
-        syn = synthesize("Doc review", results, client, chair_model=chair_model, task_type="review")
+            task_type="review", budget=budget)
+        syn = synthesize("Doc review", results, client, chair_model=chair_model,
+                         task_type="review", max_completion_tokens=budget.chair)
         sections.append(("Docs review (advisory)",
                          "Advisory only — does not affect the merge check.",
                          "Doc changes", syn, results))

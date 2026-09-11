@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import load_panels, get_api_key, Settings, truncate
+from .config import load_panels, get_api_key, Settings, truncate, resolve_budget
 from .venice import VeniceClient
 from .engine import run_panel
 from .router import pick_panel
@@ -74,15 +74,20 @@ def _run(context, panel_name, settings, panels, client, rigor, fmt, *, task_type
     if panel_name is None:
         panel_name = pick_panel(context, panels, client,
                                 router_model=settings.router_model,
-                                default=settings.default_panel, task_type=task_type)
+                                default=settings.default_panel, task_type=task_type,
+                                max_completion_tokens=settings.router_max_completion_tokens)
     if panel_name not in panels:
         print(f"error: unknown panel '{panel_name}'. Available: "
               f"{', '.join(panels)}.", file=sys.stderr)
         raise SystemExit(2)
     panel = panels[panel_name]
     rigor = rigor or panel.default_rigor
-    results = run_panel(panel, context, client, task_type=task_type)
-    syn = synthesize(context, results, client, chair_model=settings.chair_model, task_type=task_type)
+    # --rigor now buys something beyond rendering: `deep` gets a bigger output
+    # ceiling for both the seats and the chair (see [settings.rigor.deep]).
+    budget = resolve_budget(settings, panel, rigor)
+    results = run_panel(panel, context, client, task_type=task_type, budget=budget)
+    syn = synthesize(context, results, client, chair_model=settings.chair_model,
+                     task_type=task_type, max_completion_tokens=budget.chair)
     render = render_markdown if fmt == "md" else render_terminal
     print(f"[panel: {panel_name} · rigor: {rigor}]\n")
     print(render(context[:120], syn, results, rigor=rigor))
@@ -136,7 +141,10 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
 
     # ask / review actually call Venice — build the client now (needs the key).
     if client is None:
-        client = VeniceClient(get_api_key(), timeout=settings.timeout)
+        # The client-level ceiling is the backstop: every call this process makes
+        # is bounded even if a call site forgets to pass its own.
+        client = VeniceClient(get_api_key(), timeout=settings.timeout,
+                              max_completion_tokens=settings.max_completion_tokens)
 
     if args.cmd == "ask":
         ctx = _gather_context(args.question, args.file, settings.byte_cap)
@@ -207,8 +215,11 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
             else:
                 seen[label] = 1
             candidates.append((label, truncate(text, settings.byte_cap // len(args.files))))
-        res = run_compare(args.task, candidates, panels[args.panel], client,
-                          chair_model=settings.chair_model)
+        cmp_panel = panels[args.panel]
+        res = run_compare(args.task, candidates, cmp_panel, client,
+                          chair_model=settings.chair_model,
+                          budget=resolve_budget(settings, cmp_panel,
+                                                cmp_panel.default_rigor))
         from .render import render_comparison
         print(f"[compare · panel: {args.panel} · {len(candidates)} candidates]\n")
         print(render_comparison(args.task, res))
@@ -226,8 +237,11 @@ def main(argv=None, *, _settings: Settings = None, _panels=None, _client=None) -
         if not chunks:
             print(f"Nothing to scan at '{args.path}'.")
             return 0
-        report = run_sweep(chunks, panels[args.panel], client,
-                           chair_model=settings.chair_model, min_conf=args.min_conf)
+        sweep_panel = panels[args.panel]
+        report = run_sweep(chunks, sweep_panel, client,
+                           chair_model=settings.chair_model, min_conf=args.min_conf,
+                           budget=resolve_budget(settings, sweep_panel,
+                                                 sweep_panel.default_rigor))
         report.dropped = dropped
         print(f"[sweep · panel: {args.panel} · {report.chunks_scanned} files]\n")
         print(render_sweep(args.path, report))

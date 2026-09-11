@@ -23,11 +23,29 @@ CREATE TABLE IF NOT EXISTS usage (
   tokens_in  INTEGER NOT NULL DEFAULT 0,
   tokens_out INTEGER NOT NULL DEFAULT 0,
   usd        REAL,
-  source     TEXT
+  source     TEXT,
+  ext_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_usage_ts ON usage(ts);
 CREATE INDEX IF NOT EXISTS ix_usage_proj_task ON usage(project, task_type);
 """
+
+# ext_id is the idempotency key for rows that arrive from somewhere else — today
+# that is the CI merge gate, whose runner-local ledger is destroyed with the job
+# (see venice_usage/portable.py). It is NULL for every locally-appended row, so
+# the uniqueness constraint has to be partial: two identical local rows are a
+# legitimate two calls, but the same CI row ingested twice is one call.
+_EXT_INDEX = ('CREATE UNIQUE INDEX IF NOT EXISTS ux_usage_ext_id '
+              'ON usage(ext_id) WHERE ext_id IS NOT NULL')
+
+
+def _migrate(conn) -> None:
+    """Add ext_id to a ledger written before this column existed. Cheap enough
+    to run on every connect (one PRAGMA), and the only safe place to put it —
+    callers open a fresh connection per append."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(usage)")}
+    if cols and "ext_id" not in cols:
+        conn.execute("ALTER TABLE usage ADD COLUMN ext_id TEXT")
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None).isoformat()
@@ -39,21 +57,29 @@ def connect(db_path=None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
+    conn.execute(_EXT_INDEX)
+    conn.commit()
     return conn
 
 def append(*, project, task_type, model, tokens_in=0, tokens_out=0,
-           usd=None, source=None, ts=None, db_path=None) -> int:
+           usd=None, source=None, ts=None, ext_id=None, db_path=None) -> int:
+    """Append one usage row; returns its rowid, or 0 when an ext_id row was
+    already present (INSERT OR IGNORE). ext_id makes re-ingesting the same CI
+    artifact a no-op instead of double-counting the spend."""
     ts = ts or _utcnow_iso()
     if usd is None:
         from .pricing import estimate_usd
         usd = estimate_usd(model, int(tokens_in), int(tokens_out))
     with closing(connect(db_path)) as conn:
         cur = conn.execute(
-            "INSERT INTO usage(ts,project,task_type,model,tokens_in,tokens_out,usd,source)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (ts, project, task_type, model, int(tokens_in), int(tokens_out), usd, source))
+            "INSERT OR IGNORE INTO"
+            " usage(ts,project,task_type,model,tokens_in,tokens_out,usd,source,ext_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (ts, project, task_type, model, int(tokens_in), int(tokens_out), usd,
+             source, ext_id))
         conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid if cur.rowcount else 0
 
 _GROUP_COLS = {"project", "task_type", "model", "source"}
 

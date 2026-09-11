@@ -152,7 +152,10 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.delenv("COUNCIL_ENFORCE", raising=False)
     monkeypatch.delenv("COUNCIL_FILE_CAP", raising=False)
     monkeypatch.setattr(cr, "load_panels", lambda: (
-        SimpleNamespace(byte_cap=100_000, timeout=60, chair_model="chair"), {}))
+        SimpleNamespace(byte_cap=100_000, timeout=60, chair_model="chair",
+                        max_completion_tokens=24_000,
+                        chair_max_completion_tokens=8_000,
+                        router_max_completion_tokens=2_000, rigor={}), {}))
     monkeypatch.setattr(cr, "get_api_key", lambda: "key")
     def fake_client(key, **kw):
         state.client_kwargs = {"key": key, **kw}
@@ -219,3 +222,14 @@ def test_read_capped_matches_reference_truncate_output(tmp_path):
 def test_main_negative_file_cap_clamped_to_default(wired, monkeypatch):
     monkeypatch.setenv("COUNCIL_FILE_CAP", "-5")
     assert cr.main() == 0                    # clamped, no crash / no empty context
+
+
+# ---------- output ceiling on the gate path ----------
+
+def test_main_builds_a_capped_client_and_passes_settings_through(wired):
+    """The CI gate is the biggest single consumer of the council key. Its client
+    must carry an output ceiling, and run_pr_review must get the settings so the
+    chair gets the chair's ceiling rather than a seat's."""
+    assert cr.main() == 0
+    assert wired.client_kwargs["max_completion_tokens"] == 24_000
+    assert wired.review_kwargs["settings"].chair_max_completion_tokens == 8_000
