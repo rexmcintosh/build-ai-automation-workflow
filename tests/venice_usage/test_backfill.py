@@ -143,3 +143,70 @@ def test_a_dry_run_reports_the_recovery_and_writes_nothing(tmp_path):
     assert out["candidates"] == 1 and out["written"] == 0
     assert out["diem"] == pytest.approx(2.7549)
     assert not db.exists()
+
+
+# --- the window the operator asked for is the window that gets written -------
+# The billing fetch is deliberately widened a day on each side, so a call at the
+# edge of the window still finds its bill and is not mistaken for an orphan.
+# That widening must NOT leak into the set of rows written. It did: a run for
+# 2026-09-11 wrote 2026-09-10's calls too, and the reported total (39.3229 DIEM
+# of claude-fable-5-1) was two days of spend under a one-day heading. The rows
+# were individually right; the scope and the headline were wrong.
+
+SPREAD = (
+    line("claude-fable-5-1-llm-input-mtoken", 17.1602, "2026-09-10T10:21:00.000Z",
+         "before", 100, 20)
+    , line("claude-fable-5-1-llm-input-mtoken", 22.1627, "2026-09-11T10:20:38.000Z",
+           "inside", 100, 20)
+    , line("claude-fable-5-1-llm-input-mtoken", 9.9999, "2026-09-12T10:00:00.000Z",
+           "after", 100, 20)
+)
+
+
+def test_only_requests_billed_inside_the_window_are_backfilled(tmp_path):
+    from datetime import datetime
+    reqs = rc.fold_requests(list(SPREAD))
+    inside = rc.requests_in_window(reqs, datetime(2026, 9, 11), datetime(2026, 9, 12))
+    assert [r["request_id"] for r in inside] == ["inside"]
+
+    db = tmp_path / "l.db"
+    out = rc.backfill(inside, db_path=db)
+    assert out["written"] == 1
+    assert out["diem"] == pytest.approx(22.1627)
+    assert [r["ts"][:10] for r in _rows(db)] == ["2026-09-11"]
+
+
+def test_a_request_with_no_timestamp_is_still_reported_not_silently_dropped():
+    """It cannot be placed in the window, so it cannot be excluded by date
+    either. It stays in the candidate set and comes out as `unusable`."""
+    undated = {"request_id": "x", "model": "m", "amount": 1.0, "ts": None,
+               "prompt_tokens": 1, "completion_tokens": 1}
+    from datetime import datetime
+    kept = rc.requests_in_window([undated], datetime(2026, 9, 11), datetime(2026, 9, 12))
+    assert kept == [undated]
+    assert rc.backfill(kept, dry_run=True)["unusable"] == 1
+
+
+def test_run_clips_the_backfill_to_the_window_even_though_it_fetches_wider(
+        tmp_path, monkeypatch, capsys):
+    """End to end through `run()`: the fetch is three days wide, the write is
+    one. This is the exact shape of the 2026-09-11 over-report."""
+    import argparse
+    db = tmp_path / "l.db"
+    monkeypatch.setenv("VENICE_ADMIN_KEY", "sk-admin")
+    seen = {}
+
+    def fake_fetch(key, *, start, end, **kw):
+        seen.update(start=start, end=end)
+        return list(SPREAD)
+    monkeypatch.setattr(rc, "fetch_billing", fake_fetch)
+
+    a = argparse.Namespace(since="2026-09-11", until="2026-09-12", project=None,
+                           price_basis="current", db=str(db), tolerance=5.0,
+                           backfill=True, backfill_project=rc.BACKFILL_PROJECT,
+                           dry_run=False)
+    rc.run(a)
+    assert seen["start"].startswith("2026-09-10")     # fetched wide
+    assert seen["end"].startswith("2026-09-13")
+    written = _rows(db)
+    assert [r["ext_id"] for r in written] == ["venice-bill:inside"]   # wrote narrow

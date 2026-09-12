@@ -166,6 +166,31 @@ def match(ledger_rows, requests, window=MATCH_WINDOW_SECONDS):
     return matched, unmatched
 
 
+def requests_in_window(requests, start, end):
+    """The requests billed inside the operator's window, inclusive.
+
+    The billing fetch is deliberately a day wider on each side, so a call at the
+    edge of the window still finds its bill and is not mistaken for an orphan.
+    That widening must never reach the rows this writes. It did once: a run for
+    `--since 2026-09-11 --until 2026-09-12` wrote 2026-09-10's calls as well and
+    reported 39.3229 DIEM of `claude-fable-5-1` where the day's bill was
+    22.1627. Each row was right; the scope was two days wide under a one-day
+    heading, and a number that cannot be reproduced from the invoice is worth
+    nothing in an audit trail.
+
+    A request with no timestamp is kept, not dropped: it cannot be placed in the
+    window, so it cannot be excluded by date either, and `backfill` reports it
+    as unusable rather than losing it silently."""
+    out = []
+    for r in requests:
+        if not r.get("ts"):
+            out.append(r)
+            continue
+        if start <= _parse_ts(r["ts"]) <= end:
+            out.append(r)
+    return out
+
+
 def orphan_requests(requests, matched):
     """Billed requests that no ledger row claims — spend with no local trace.
 
@@ -230,10 +255,16 @@ def backfill(requests, *, db_path=None, project=BACKFILL_PROJECT, dry_run=False)
     return out
 
 
-def render_backfill(out, *, dry_run=False):
+def render_backfill(out, *, dry_run=False, since=None, until=None):
     head = "would recover" if dry_run else "recovered"
-    lines = [f"\n{head}: {out['candidates']} billed request(s) with no ledger row, "
-             f"{out['diem']:.4f} DIEM"]
+    # Name the window on the same line as the total. The over-report this fixes
+    # was only invisible because the heading said "2026-09-11" and the figure
+    # was two days wide; a total whose window is unstated cannot be checked
+    # against the invoice, and an unverifiable number in an audit trail is worse
+    # than a gap.
+    span = f" in {since or '(start)'}..{until or 'now'}"
+    lines = [f"\n{head}{span}: {out['candidates']} billed request(s) with no "
+             f"ledger row, {out['diem']:.4f} DIEM"]
     for model, diem in sorted(out["by_model"].items(), key=lambda kv: -kv[1]):
         lines.append(f"  {model:38} {diem:10.4f}")
     lines.append(f"  written={out['written']} already-recorded={out['skipped']} "
@@ -249,6 +280,12 @@ def render_backfill(out, *, dry_run=False):
 
 
 def read_ledger(db_path, *, since=None, until=None, project=None):
+    # A ledger that does not exist yet has no rows, which is not an error: it is
+    # the exact starting state of the first `--backfill` on a fresh box, and the
+    # read-only connect below raises rather than returning empty.
+    from pathlib import Path
+    if not Path(db_path).exists():
+        return []
     sql = "SELECT ts, project, model, tokens_in, tokens_out, usd FROM usage"
     where, params = [], []
     if since:
@@ -390,9 +427,14 @@ def run(a):
                                  since=wide_start.isoformat(timespec="seconds"),
                                  until=wide_end.isoformat(timespec="seconds"))
         claimed, _ = match(everything, requests)
-        out = backfill(orphan_requests(requests, claimed), db_path=db_path,
+        # Orphans are found over the WIDENED set, so a call just outside the
+        # window is claimed by the ledger row just outside it and is not a false
+        # orphan. Only then is the set clipped back to the window the operator
+        # actually asked for, so the widening can never inflate what is written.
+        orphans = requests_in_window(orphan_requests(requests, claimed), start, end)
+        out = backfill(orphans, db_path=db_path,
                        project=a.backfill_project, dry_run=a.dry_run)
-        print(render_backfill(out, dry_run=a.dry_run))
+        print(render_backfill(out, dry_run=a.dry_run, since=a.since, until=a.until))
 
     if not summary["billed"]:
         print("no billed request matched a ledger row in that window", file=sys.stderr)
