@@ -53,8 +53,11 @@ def _seed(db):
            tokens_in=800, tokens_out=100, usd=0.02, ts="2026-07-19T02:00:00", db_path=db)
 
 def test_rollup_groups_and_sums(tmp_path):
+    # price_basis="stored" sums the usd column as written, which is what this
+    # test is about. The default basis reprices from the current table instead —
+    # see test_price_basis.py.
     db = tmp_path / "l.db"; _seed(db)
-    rows = query_rollup(group_by=("project",), db_path=db)
+    rows = query_rollup(group_by=("project",), db_path=db, price_basis="stored")
     by = {r["project"]: r for r in rows}
     assert by["romance"]["calls"] == 2 and by["romance"]["usd"] == 0.10
     assert by["council"]["usd"] == 0.02

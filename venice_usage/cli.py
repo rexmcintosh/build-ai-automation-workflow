@@ -19,15 +19,31 @@ def _cmd_log(a) -> int:
     return 0
 
 def _cmd_report(a) -> int:
+    """Roll the ledger up — and say, every single time, which prices were used.
+
+    The header is not decoration. A report that silently mixed a stale table's
+    numbers with fresh ones put a 2.5x overstatement into an audit; naming the
+    basis and the table's vintage on every report is the fix for that."""
+    from .pricing import REFRESHED_AT, basis_line, is_stale
     gb = tuple(c.strip() for c in a.group_by.split(",") if c.strip())
     try:
-        rows = query_rollup(since=a.since, until=a.until, project=a.project, group_by=gb)
+        rows = query_rollup(since=a.since, until=a.until, project=a.project,
+                            group_by=gb, price_basis=a.price_basis)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr); return 2
     if a.json:
-        print(json.dumps(rows, indent=1)); return 0
+        print(json.dumps({"price_basis": a.price_basis,
+                          "prices_refreshed_at": REFRESHED_AT,
+                          "prices_stale": is_stale(),
+                          "rows": rows}, indent=1))
+        return 0
+    print(basis_line(a.price_basis))
     if not rows:
         print("(no usage rows)"); return 0
+    unpriced = sum(r.get("unpriced_calls", 0) for r in rows)
+    if unpriced:
+        print(f"note: {unpriced} call(s) could not be valued on this basis and "
+              f"count as 0 — they are not free")
     headers = list(gb) + ["calls", "tokens_in", "tokens_out", "usd"]
     widths = {h: max(len(h), *(len(str(r[h])) for r in rows)) for h in headers}
     print("  ".join(h.ljust(widths[h]) for h in headers))
@@ -106,6 +122,12 @@ def main(argv=None) -> int:
     rp = sub.add_parser("report")
     rp.add_argument("--since"); rp.add_argument("--until"); rp.add_argument("--project")
     rp.add_argument("--group-by", default="project,task_type", dest="group_by")
+    rp.add_argument("--price-basis", default="current", choices=("current", "stored"),
+                    dest="price_basis",
+                    help="current (default): value every row from the current price "
+                         "table on read. stored: sum the usd column as it was written "
+                         "at log time — mixed vintages, unpriced models read as 0. "
+                         "Neither ever modifies a stored row.")
     rp.add_argument("--json", action="store_true")
     argv = sys.argv[1:] if argv is None else list(argv)
     # Deviation from brief, flagged: argparse's own validation (missing --model,

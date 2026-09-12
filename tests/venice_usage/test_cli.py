@@ -23,7 +23,12 @@ def test_report_json_rollup(tmp_path, monkeypatch, capsys):
     cli.main(["log", "--project", "romance", "--task-type", "edit", "--model", "m", "--usd", "0.05"])
     rc = cli.main(["report", "--group-by", "project", "--json"])
     assert rc == 0
-    data = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
+    # The JSON report names its price basis: a rollup whose vintage is unstated
+    # is what put a 2.5x error into an audit. "m" is not a priceable model, so
+    # both bases fall back to the --usd the caller supplied.
+    assert payload["price_basis"] == "current"
+    data = payload["rows"]
     assert data[0]["project"] == "romance" and abs(data[0]["usd"] - 0.25) < 1e-9
 
 def test_log_never_raises_on_malformed_arguments(tmp_path, monkeypatch, capsys):
