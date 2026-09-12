@@ -1,5 +1,22 @@
 # Making the CI merge gate's Venice spend durable — 2026-09-11
 
+> **Superseded in part, 2026-09-12.** Two corrections and a verified runbook are
+> in [`ci-usage-rollout-2026-09-12.md`](ci-usage-rollout-2026-09-12.md):
+>
+> 1. §"The finding, confirmed" below says the runner logs its spend into a
+>    ledger that dies with the job. At the **pinned** council (`4a01298`,
+>    v0.4.0) it does not log at all: that commit packages `council` only — no
+>    `venice_usage`, and `council/venice.py` has no `_log_usage`. The pin bump
+>    is what turns CI logging on; `VENICE_USAGE_DB` + export + upload is what
+>    keeps it. The conclusion is unchanged, the mechanism is not.
+> 2. §"The workflow change" carries a `REPLACE_WITH_MERGE_SHA` placeholder. The
+>    pin is `026900319c4deb479d6c9abe01fd537ac5ac09a4`, derived in the rollout
+>    doc; it does not depend on any branch merging.
+>
+> `tools/ci-usage/repos.txt` named three repos by their `~/projects` directory
+> name rather than their GitHub name, and `pull.sh` reported the resulting 404
+> as "no runs in window". Both fixed 2026-09-12.
+
 ## The finding, confirmed
 
 `council/venice.py:39-52` `_log_usage()` fires on every Venice call, including
@@ -92,6 +109,11 @@ merge gate fails. `ingest` is an operator command and exits 2 on a real failure.
 `tools/ci-usage/repos.txt`, then `venice-usage ingest`. Safe to cron: idempotent.
 
 ## The workflow change (proposal — NOT applied)
+
+> Superseded by [`ci-usage-rollout-2026-09-12.md`](ci-usage-rollout-2026-09-12.md),
+> which carries the real pin, both patches (the shared one and
+> swimtrack-website's), the per-repo apply command and the verification
+> hashes. The diff below is kept for the reasoning, not for use.
 
 Full proposed file: [`proposals/venice-review.yml.proposed`](proposals/venice-review.yml.proposed).
 Patch: [`proposals/venice-review-usage-artifact.patch`](proposals/venice-review-usage-artifact.patch).

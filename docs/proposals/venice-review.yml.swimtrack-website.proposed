@@ -40,6 +40,27 @@ jobs:
           git diff --no-color "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
           echo "size=$(wc -c </tmp/pr.diff)" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Test application logic
+        run: npm test
+
+      - name: Verify season migration and payment sequences
+        run: npm run test:season-db
+
+      - name: Check translations are current
+        run: npm run translate -- --check
+
+      - name: Check article reading level (grade-8 rule)
+        run: npm run check:readability
+
       - name: Run Venice review council
         env:
           VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
@@ -47,6 +68,11 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           DIFF_PATH: /tmp/pr.diff
+          # The shim reads full changed-file contents from the checkout to ground findings.
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          # Set repo/org variable COUNCIL_ENFORCE=0 to run advisory (post comment, never
+          # fail on findings) during calibration. Engine/infra failures still fail closed.
+          COUNCIL_ENFORCE: ${{ vars.COUNCIL_ENFORCE || '1' }}
           # Put the usage ledger somewhere we can find it again. Without this it
           # lands in the runner's $HOME and dies with the job.
           VENICE_USAGE_DB: ${{ runner.temp }}/venice-usage.db
