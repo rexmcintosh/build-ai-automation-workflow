@@ -31,6 +31,13 @@ def test_risk_tier_full_when_unknown():
     assert risk_tier([]) == "full"        # no paths -> safe default
 
 
+def test_risk_tier_full_for_privileged_tooling_but_not_low_risk_fixture():
+    assert risk_tier([".github/workflows/venice-review.yml"]) == "full"
+    assert risk_tier(["scripts/deploy-preview.sh"]) == "full"
+    assert risk_tier(["bin/tg-send"]) == "full"
+    assert risk_tier(["tools/i18n/translate.mjs"]) == "reduced"
+
+
 # ── candidate bar, tier-aware + normalized (F6) ──────────────────────────────
 def test_full_tier_candidate_bar():
     assert is_candidate("critical", 1, tier="full") is True        # critical any conf

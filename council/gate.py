@@ -13,6 +13,8 @@ verified against the code (audit F1/F2/F4/F6). This module replaces that with:
 """
 from __future__ import annotations
 
+import re
+
 from .models import MemberResult, Synthesis
 
 # Synonyms a model might emit, mapped to the canonical ladder info<low<med<high<critical.
@@ -29,6 +31,16 @@ _DEV_SEGMENTS = {"tools", "scripts", "test", "tests", "__tests__", ".github", "c
 # Segments that force the FULL gate regardless of where they live.
 _HIGH_RISK_SEGMENTS = {"auth", "authz", "login", "session", "payment", "payments",
                        "billing", "security", "crypto", "secrets"}
+_PRIVILEGED_TOOL_ACTIONS = {"deploy", "publish", "release", "send", "push", "upload", "provision"}
+
+
+def _is_privileged_tool_path(path: str) -> bool:
+    """Tooling that can change CI authority or write outside the checkout uses the full gate."""
+    segs = [s.lower() for s in (path or "").split("/") if s]
+    if len(segs) >= 2 and segs[:2] == [".github", "workflows"]:
+        return True
+    words = set(re.findall(r"[a-z0-9]+", segs[-1] if segs else ""))
+    return bool(words & _PRIVILEGED_TOOL_ACTIONS)
 
 
 def normalize_severity(s: str) -> str:
@@ -62,6 +74,8 @@ def risk_tier(paths) -> str:
         return "full"
     if any(seg in _HIGH_RISK_SEGMENTS
            for p in paths for seg in p.lower().split("/")):
+        return "full"
+    if any(_is_privileged_tool_path(p) for p in paths):
         return "full"
     return "reduced" if all(_is_dev_path(p) for p in paths) else "full"
 
