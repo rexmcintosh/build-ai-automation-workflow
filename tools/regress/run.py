@@ -31,6 +31,18 @@ REPO_ROOT = HERE.parents[1]
 FIXTURES = HERE / "fixtures"
 
 
+def _golden_fixtures():
+    """The golden set, loaded BY NAME rather than by listing the directory.
+
+    `fixtures/` is no longer exclusively this script's: the chair bake-off
+    (`bakeoff.py`) keeps `baw-pr11` there, and a directory listing would sweep
+    it into the pinned v0.4.0 regression, change the matrix from 4 cells to 6,
+    and fail `_validate_golden_set` before a single call. Naming the set keeps
+    this run's contract fixed no matter what else is stored alongside it.
+    """
+    return [harness.load_fixture(FIXTURES / fixture_id) for fixture_id in EXPECTED_FIXTURE_IDS]
+
+
 def _load_hook(specification: str | None):
     if not specification:
         return None
@@ -158,7 +170,7 @@ def _write_bootstrap_failure(output: Path, phase: str, exc: Exception, fixtures=
 def worker(*, output: Path, transport_hook: str | None) -> int:
     fixtures = []
     try:
-        fixtures = harness.load_fixtures(FIXTURES)
+        fixtures = _golden_fixtures()
         _validate_golden_set(fixtures)
         settings, panels, run_pr_review = _load_pinned_council()
         client = _build_client(settings, transport_hook)
@@ -223,7 +235,7 @@ def _validate_golden_set(fixtures) -> int:
 
 
 def _dry_run(output: Path) -> int:
-    fixtures = harness.load_fixtures(FIXTURES)
+    fixtures = _golden_fixtures()
     cells = _validate_golden_set(fixtures)
     payload = {
         "schema_version": 1,
