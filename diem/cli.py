@@ -125,46 +125,77 @@ def _cmd_status(cfg, now: datetime) -> int:
 
 
 def _cmd_venice_usage(cfg, now, *, days=7, as_json=False) -> int:
-    since = (now - timedelta(days=days)).isoformat(timespec="seconds")
-    ledger = {r["project"]: r["usd"]
-              for r in venice_usage.query_rollup(since=since, group_by=("project",))}
-    venice_usd: dict[str, float] = {}
-    venice_diem: dict[str, float] = {}
+    """Ledger estimate against Venice's real bills, over a real N-day window.
+
+    Two tables, because the two sides do not share the same axes. Venice's
+    invoice carries no key or project tag, so the project table can only ever be
+    the ledger's own estimate. The model IS shared, and it is where the useful
+    finding lives: a model Venice billed that the ledger never recorded is spend
+    with no local trace at all (see `venice-usage reconcile --backfill`)."""
+    start = now - timedelta(days=days)
+    since, until = (start.isoformat(timespec="seconds"),
+                    now.isoformat(timespec="seconds"))
+    projects = [{"project": r["project"], "est_diem": round(r["usd"], 4),
+                 "calls": r["calls"]}
+                for r in venice_usage.query_rollup(since=since, until=until,
+                                                   group_by=("project",))]
+    ledger_models = {r["model"]: r for r in
+                     venice_usage.query_rollup(since=since, until=until,
+                                               group_by=("model",))}
+    billed: dict[str, dict] = {}
     warn = None
     try:
-        for k in UsageClient(load_venice_admin_key()).per_key_usage():
-            name = k["key_name"]
-            proj = name[len("proj-"):] if name.startswith("proj-") else name
-            venice_usd[proj] = venice_usd.get(proj, 0.0) + k["usd"]
-            venice_diem[proj] = venice_diem.get(proj, 0.0) + k["diem"]
+        billed = UsageClient(load_venice_admin_key()).billed_by_model(start=start,
+                                                                      end=now)
     except (UsageUnavailable, SystemExit) as e:
         warn = str(e) or "venice usage unavailable"
-    projects = sorted(set(ledger) | set(venice_usd))
-    rows = []
-    for p in projects:
-        lu, vu, vd = ledger.get(p), venice_usd.get(p), venice_diem.get(p)
-        note = "" if (lu is not None and vu is not None) else \
-               ("uncovered" if lu is None else "no key")
-        rows.append({"project": p,
-                     "est_usd": round(lu or 0.0, 4),
-                     "venice_usd": None if vu is None else round(vu, 4),
-                     "venice_diem": None if vd is None else round(vd, 4),
-                     "note": note})
+
+    models = []
+    for m in sorted(set(ledger_models) | set(billed)):
+        led, bill = ledger_models.get(m), billed.get(m)
+        # "untracked" is the claude-fable-5-1 shape: Venice billed it, nothing
+        # local recorded it. "no bill" is usually benign — an image model billed
+        # per asset, or a call whose invoice has not landed yet.
+        note = "" if (led and bill) else ("untracked" if led is None else "no bill")
+        if warn:
+            note = ""
+        models.append({"model": m,
+                       "calls": led["calls"] if led else 0,
+                       "est_diem": round(led["usd"], 4) if led else 0.0,
+                       "billed_diem": None if bill is None else round(bill["diem"], 4),
+                       "billed_calls": None if bill is None else bill["calls"],
+                       "note": note})
+    total = round(sum(c["diem"] for c in billed.values()), 4) if billed else 0.0
+
     if as_json:
-        print(json.dumps({"days": days, "warning": warn, "rows": rows}, indent=1))
+        print(json.dumps({"days": days, "since": since, "until": until,
+                          "warning": warn, "billed_diem": total,
+                          "projects": projects, "models": models}, indent=1))
         return 0
     if warn:
         print(f"warning: Venice usage unavailable ({warn}) — showing ledger only")
-    print(f"venice-usage reconcile (last {days}d)")
-    # est$ is the ledger's price-table estimate, NOT billed spend. Inference keys are
-    # capped usd:0 and run on the DIEM allowance, so venice$ is normally 0.0000 and
-    # `diem` is the figure that reflects real consumption.
-    print("est$ = ledger estimate (notional); venice$ = billed USD; diem = allowance used")
-    print(f"{'project':16} {'est$':>9} {'venice$':>9} {'diem':>9}  note")
-    for r in rows:
-        vu = "-" if r["venice_usd"] is None else f"{r['venice_usd']:.4f}"
-        vd = "-" if r["venice_diem"] is None else f"{r['venice_diem']:.4f}"
-        print(f"{r['project']:16} {r['est_usd']:9.4f} {vu:>9} {vd:>9}  {r['note']}")
+    print(f"venice-usage (last {days}d: {since} .. {until})")
+    # est is the ledger's price-table estimate, NOT billed spend. billed comes
+    # from /billing/usage-history and is what the account was actually charged.
+    print("est = ledger price-table estimate (notional); "
+          "billed = Venice-billed DIEM for this window")
+    print(f"\n{'project':16} {'calls':>7} {'est':>10}   (bills carry no project tag, "
+          f"so this side is ledger-only)")
+    for r in projects:
+        print(f"{r['project']:16} {r['calls']:7} {r['est_diem']:10.4f}")
+    print(f"\n{'model':30} {'calls':>7} {'est':>10} {'billed':>10}  note")
+    for r in models:
+        b = "-" if r["billed_diem"] is None else f"{r['billed_diem']:.4f}"
+        print(f"{r['model']:30} {r['calls']:7} {r['est_diem']:10.4f} {b:>10}  "
+              f"{r['note']}")
+    if not warn:
+        print(f"{'TOTAL billed':30} {'':7} {'':10} {total:10.4f}")
+        lost = [r for r in models if r["note"] == "untracked"]
+        if lost:
+            diem = sum(r["billed_diem"] or 0.0 for r in lost)
+            print(f"\n{len(lost)} model(s) Venice billed and the ledger never "
+                  f"recorded: {diem:.4f} DIEM. Recover them with "
+                  f"`venice-usage reconcile --since {since[:10]} --backfill`.")
     return 0
 
 

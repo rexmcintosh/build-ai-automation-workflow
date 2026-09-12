@@ -20,7 +20,8 @@ class VeniceError(RuntimeError):
 class VeniceClient:
     def __init__(self, api_key: str, *, base_url: str = VENICE_API, timeout: int = 180,
                  retries: int = 2, backoff: float = 1.5, temperature: float = 0.2,
-                 post: Optional[Callable] = None) -> None:
+                 post: Optional[Callable] = None,
+                 transport_is_real: Optional[bool] = None) -> None:
         if not api_key:
             raise VeniceError("VENICE_API_KEY is not set")
         self.api_key = api_key
@@ -30,6 +31,12 @@ class VeniceClient:
         self.backoff = backoff
         self.temperature = temperature
         self._post = post or requests.post
+        # See council/venice.py and venice_usage/guard.py: an injected transport
+        # means the call is not real, so its usage may not reach the production
+        # ledger. Pass transport_is_real=True for a wrapper that really calls out.
+        self._transport_is_real = (
+            (post is None or post is requests.post) if transport_is_real is None
+            else bool(transport_is_real))
 
     def _scrub(self, text: str) -> str:
         if text and self.api_key:
@@ -40,14 +47,13 @@ class VeniceClient:
         # Usage logging must never break or slow the Venice call — swallow everything.
         try:
             import venice_usage
-            usage = data.get("usage") or {} if isinstance(data, dict) else {}
-            venice_usage.append(
+            venice_usage.log_client_call(
+                data=data,
+                model=model,
                 project="loom",
                 task_type=task,
-                model=model,
-                tokens_in=usage.get("prompt_tokens") or 0,
-                tokens_out=usage.get("completion_tokens") or 0,
                 source="loom/venice",
+                transport_is_real=self._transport_is_real,
             )
         except Exception:
             pass

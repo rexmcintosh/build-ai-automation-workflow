@@ -5,13 +5,36 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+def production_db() -> Path:
+    """THE ledger — the one with the real money in it.
+
+    A function, not a constant, for two reasons: `Path.home()` must be read at
+    call time, and a test needs one place to redirect so it can exercise the
+    "this is production" branch without going anywhere near the real file."""
+    return Path.home() / ".local/state/venice-usage/ledger.db"
+
+
 def default_db() -> Path:
     # Resolve at CALL time (not import) so $VENICE_USAGE_DB set later — e.g. by a
     # test's monkeypatch.setenv — is honored.
     env = os.environ.get("VENICE_USAGE_DB")
     if env:  # absent OR empty-string -> use the default path
         return Path(env)
-    return Path.home() / ".local/state/venice-usage/ledger.db"
+    return production_db()
+
+
+def is_production_db(db_path=None) -> bool:
+    """True when this path is the production ledger.
+
+    Resolved on both sides, so a symlink or a `~` cannot smuggle a write past
+    the check. Anything unresolvable is treated as NOT production — the caller
+    of this predicate refuses on True, and refusing to log an honest call is a
+    worse failure than the one it would be guarding against."""
+    target = Path(db_path) if db_path else default_db()
+    try:
+        return target.expanduser().resolve() == production_db().resolve()
+    except OSError:
+        return False
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage (
