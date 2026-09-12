@@ -84,7 +84,23 @@ def append(*, project, task_type, model, tokens_in=0, tokens_out=0,
 _GROUP_COLS = {"project", "task_type", "model", "source"}
 
 def query_rollup(*, since=None, until=None, project=None,
-                 group_by=("project", "task_type"), db_path=None) -> list[dict]:
+                 group_by=("project", "task_type"), db_path=None,
+                 price_basis="current") -> list[dict]:
+    """Roll the ledger up, valued on one of two explicit bases.
+
+    `price_basis="current"` (the default) values every row from the CURRENT
+    price table on read; `"stored"` sums the `usd` column exactly as it was
+    written. Neither ever writes: stored rows are an audit trail of what each
+    call was estimated at when it was logged, and rewriting them would both
+    destroy that and clobber the real per-asset figures the image engine passes
+    with `--usd`. See `pricing.basis_line` for the header every report prints —
+    a rollup whose basis is not stated is how a 2.5x error reached an audit.
+
+    Each row also carries `unpriced_calls`: calls the chosen basis could put no
+    number on at all, so a zero is never mistaken for free."""
+    from .pricing import BASES, PRICES
+    if price_basis not in BASES:
+        raise ValueError(f"unknown price_basis {price_basis!r}; expected one of {BASES}")
     if isinstance(group_by, str):
         raise ValueError("group_by must be a sequence of columns, not a string")
     group_by = tuple(group_by)
@@ -98,18 +114,46 @@ def query_rollup(*, since=None, until=None, project=None,
     if until:   where.append("ts <= ?"); params.append(until)
     if project: where.append("project = ?"); params.append(project)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
-    cols = ", ".join(group_by)
+    # Group by the caller's columns PLUS model, always. Price is per model and
+    # linear in tokens, so repricing a (cols, model) subgroup from its token
+    # sums is exact, and folding the subgroups back up afterwards costs nothing.
+    inner = tuple(dict.fromkeys(group_by + ("model",)))
+    cols = ", ".join(inner)
     sql = (f"SELECT {cols}, COUNT(*) AS calls, "
            "COALESCE(SUM(tokens_in),0) AS tokens_in, "
            "COALESCE(SUM(tokens_out),0) AS tokens_out, "
-           "COALESCE(SUM(usd),0.0) AS usd "
-           f"FROM usage{clause} GROUP BY {cols} ORDER BY usd DESC")
+           "COALESCE(SUM(usd),0.0) AS usd, "
+           "SUM(CASE WHEN usd IS NULL THEN 1 ELSE 0 END) AS null_usd "
+           f"FROM usage{clause} GROUP BY {cols}")
     with closing(connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-    # SQLite SUM() over REAL accumulates binary floating-point error (e.g. 0.09+0.01
-    # -> 0.09999999999999999); round to the same 6-decimal precision pricing.py's
-    # estimate_usd() already uses, so aggregated usd matches cent-level expectations.
+        subgroups = [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    out: dict[tuple, dict] = {}
+    for sub in subgroups:
+        rate = PRICES.get(sub["model"])
+        if price_basis == "current" and rate is not None:
+            usd = sub["tokens_in"] / 1e6 * rate["input"] + \
+                  sub["tokens_out"] / 1e6 * rate["output"]
+            unpriced = 0
+        else:
+            # No table row (an image model's real --usd, a retired id, a test
+            # double), or the caller asked for the stored basis: take what is
+            # written and count what was written as nothing.
+            usd, unpriced = sub["usd"], sub["null_usd"]
+        key = tuple(sub[c] for c in group_by)
+        row = out.setdefault(key, {**{c: sub[c] for c in group_by}, "calls": 0,
+                                   "tokens_in": 0, "tokens_out": 0, "usd": 0.0,
+                                   "unpriced_calls": 0})
+        row["calls"] += sub["calls"]
+        row["tokens_in"] += sub["tokens_in"]
+        row["tokens_out"] += sub["tokens_out"]
+        row["usd"] += usd
+        row["unpriced_calls"] += unpriced
+    rows = sorted(out.values(), key=lambda r: -r["usd"])
+    # Float addition over REAL accumulates binary error (e.g. 0.09+0.01 ->
+    # 0.09999999999999999); round to the same 6-decimal precision pricing.py's
+    # estimate_usd() uses, so aggregated usd matches cent-level expectations.
     for r in rows:
         r["usd"] = round(r["usd"], 6)
     return rows
