@@ -17,11 +17,26 @@ FIXTURES = Path(__file__).parents[1] / "tools" / "regress" / "fixtures"
 def test_committed_fixtures_are_complete_and_match_their_manifest():
     fixtures = harness.load_fixtures(FIXTURES)
 
-    assert [fixture.fixture_id for fixture in fixtures] == ["aris-pr1", "stw-pr11"]
-    assert all(fixture.expected_blocking == 0 for fixture in fixtures)
+    # `fixtures/` holds the pinned golden set AND the chair bake-off's own case;
+    # every committed fixture must still hash-validate.
+    assert [fixture.fixture_id for fixture in fixtures] == ["aris-pr1", "baw-pr11", "stw-pr11"]
+    assert {f.fixture_id: f.expected_blocking for f in fixtures} == {
+        "aris-pr1": 0, "baw-pr11": 2, "stw-pr11": 0,
+    }
     assert all(len(fixture.base) == 40 and len(fixture.head) == 40 for fixture in fixtures)
     for fixture in fixtures:
         harness.validate_fixture(fixture)
+
+
+def test_golden_set_is_pinned_by_name_not_by_directory_listing():
+    """The pinned regression's matrix must not grow when a fixture is added.
+
+    `baw-pr11` lives in the same directory for the bake-off; loading the golden
+    set by listing would sweep it in, change 4 cells to 6, and change what a
+    `--paid` run costs and claims.
+    """
+    assert [f.fixture_id for f in run._golden_fixtures()] == list(run.EXPECTED_FIXTURE_IDS)
+    assert len(harness.build_run_matrix(run._golden_fixtures())) == 4
 
 
 def test_context_uses_fixed_head_files_and_required_anchors():
@@ -70,9 +85,7 @@ def test_context_caps_each_file_and_the_total(tmp_path):
 
 
 def test_run_matrix_has_grounded_and_ungrounded_arm_for_each_fixture():
-    fixtures = harness.load_fixtures(FIXTURES)
-
-    matrix = harness.build_run_matrix(fixtures)
+    matrix = harness.build_run_matrix(run._golden_fixtures())
 
     assert [(case.fixture.fixture_id, case.grounding) for case in matrix] == [
         ("aris-pr1", "none"),
@@ -173,7 +186,7 @@ def test_result_grading_rejects_malformed_records(record):
 
 
 def test_dry_run_rejects_an_empty_or_changed_golden_set(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(harness, "load_fixtures", lambda path: [])
+    monkeypatch.setattr(run, "_golden_fixtures", lambda: [])
     called = []
     monkeypatch.setattr(run, "install_and_run", lambda **kwargs: called.append(kwargs))
 
@@ -253,7 +266,7 @@ def test_worker_paid_still_requires_operator_estimate(monkeypatch, tmp_path, cap
 def test_worker_rejects_changed_fixture_set_before_loading_council(monkeypatch, tmp_path):
     loaded = []
     output = tmp_path / "evidence.json"
-    monkeypatch.setattr(harness, "load_fixtures", lambda path: [])
+    monkeypatch.setattr(run, "_golden_fixtures", lambda: [])
     monkeypatch.setattr(run, "_load_pinned_council", lambda: loaded.append(True))
 
     exit_code = run.worker(output=output, transport_hook=None)
