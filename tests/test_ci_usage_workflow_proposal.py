@@ -54,6 +54,19 @@ def test_both_proposals_pin_the_same_council():
     assert _pins(PROPOSED.read_text()) == _pins(SW_PROPOSED.read_text())
 
 
+def test_this_repo_uses_the_compatible_proposed_workflow():
+    # The local rollout advances its pin again to include the privileged tooling fix.
+    current = WORKFLOW.read_text()
+    pin = _pins(current)[0]
+    assert len(pin) == 40 and pin != OLD_PIN
+    config = subprocess.check_output(["git", "show", f"{pin}:council/config.py"], cwd=ROOT, text=True)
+    assert "max_completion_tokens" in config
+    gate = subprocess.check_output(["git", "show", f"{pin}:council/gate.py"], cwd=ROOT, text=True)
+    scope = {"__name__": "council.pinned_gate", "__package__": "council"}
+    exec(compile(gate, "pinned/council/gate.py", "exec"), scope)
+    assert scope["risk_tier"](["tools/publish.py"]) == "full"
+
+
 def test_the_pin_is_a_commit_that_exists_in_this_repo_and_carries_venice_usage():
     """The pin has to be reachable from this repo's history, and it has to be a
     commit where `venice-usage` is a console script — the export step's command."""
@@ -66,9 +79,13 @@ def test_the_pin_is_a_commit_that_exists_in_this_repo_and_carries_venice_usage()
         ["git", "-C", str(ROOT), "show", f"{pin}:pyproject.toml"], text=True)
     assert 'venice-usage = "venice_usage.cli:main"' in pyproject, (
         f"pin {pin} has no venice-usage console script; the export step would fail")
+    config = subprocess.check_output(
+        ["git", "-C", str(ROOT), "show", f"{pin}:council/config.py"], text=True)
+    assert "max_completion_tokens" in config, (
+        f"pin {pin} lacks Settings.max_completion_tokens; this repo's review script would fail")
 
 
-@pytest.mark.parametrize("path", [PROPOSED, SW_PROPOSED])
+@pytest.mark.parametrize("path", [PROPOSED, SW_PROPOSED, WORKFLOW])
 def test_proposed_workflow_carries_all_three_edits(path):
     doc = yaml.safe_load(path.read_text())
     steps = doc["jobs"]["review"]["steps"]
@@ -124,7 +141,7 @@ def test_patch_turns_this_repo_s_workflow_into_the_proposed_file(tmp_path):
     (the workflow already IS the proposal). Anything else means the patch and
     the proposal have drifted apart."""
     current = WORKFLOW.read_text()
-    if current == PROPOSED.read_text():
+    if _pins(current) and _pins(current)[0] != OLD_PIN:
         pytest.skip("rollout already applied to this repo")
     assert _apply(PATCH, current, tmp_path) == PROPOSED.read_text()
 

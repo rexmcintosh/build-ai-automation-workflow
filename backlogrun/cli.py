@@ -8,6 +8,7 @@ and the item is left `in_review` (or `held`) for the human's morning review.
 
 Subcommands:
   work      nightly: pick open items (oldest first, bounded), work each, review, mark.
+  rework    continue one held/in_review item on its existing reviewed branch.
   report    write + print the morning report (numbered, for approve/drop by number).
   list      one line per active item.
   show      item fields + saved council review + diff stat.
@@ -19,7 +20,7 @@ Subcommands:
 
 Safety contract (~/projects/backlog/README.md), enforced here and tagged C1..C4:
   C1 Branch-contained. Every item is worked in its own worktree on claude/bl-<slug>.
-     `work` never pushes, merges, or touches any other branch. Only `approve`, an
+     `work` and `rework` never push, merge, or touch any other branch. Only `approve`, an
      explicit human command, merges and pushes.
   C2 No outward-facing or irreversible actions. The session gets: (a) a scrubbed
      environment — no secrets, no Claude-session variables; (b) `git push` disabled
@@ -32,7 +33,8 @@ Safety contract (~/projects/backlog/README.md), enforced here and tagged C1..C4:
   C3 Every worked diff is council-reviewed (the council package, in-process, same panel
      as `council review --diff`); the verdict — or the review failure — is recorded on
      the item.
-  C4 `work` only ever moves open -> in_review | held. Nothing else, ever.
+  C4 `work` moves open -> in_review | held. `rework` moves the same held/in_review item
+     back to reviewed or held state without changing merge authority.
 Also: fail closed per item (one failure never aborts the batch); bounded (max items,
 per-item timeout + budget, global deadline); one run at a time (flock); backlog.yaml is
 re-read under feedback-sync's lock directory immediately before every write, so a
@@ -181,7 +183,7 @@ EX_TEMPFAIL = 75
 
 
 class RunLock:
-    """One mutating command (`work`/`approve`/`drop`/`hold`/`reopen`) at a time — flock on
+    """One mutating command (`work`/`rework`/`approve`/`drop`/`hold`/`reopen`) at a time — flock on
     the state dir. Contention exits 75 (EX_TEMPFAIL) so a skipped nightly run is visible
     in cron.log as a failure, not a silent success."""
 
@@ -559,8 +561,19 @@ def write_session_settings(cfg: Config) -> None:
 
 
 def compose_prompt(item: dict, *, repo_name: str, worktree: str, branch: str, base: str,
-                   minutes: int) -> str:
-    return f"""You are `backlog-run`, an unattended nightly Claude Code session. Nobody is watching and nobody can answer questions. Work the backlog item below to completion on your own, or stop cleanly.
+                   minutes: int, continuation: bool = False) -> str:
+    opening = (
+        "Continue the existing branch for a bounded rework pass. Preserve every prior commit and "
+        "inspect the branch, item brief, and durable evidence before changing anything."
+        if continuation else
+        "You are `backlog-run`, an unattended nightly Claude Code session. Nobody is watching and "
+        "nobody can answer questions. Work the backlog item below to completion on your own, or stop cleanly."
+    )
+    continuation_rules = ("""
+12. Never replay a possibly completed external action. Inspect durable state, leave any outward step held, and report the exact check a human must make.
+13. Changes and a resource budget do not grant merge permission. Leave this branch for fresh review and explicit approval.
+""" if continuation else "")
+    return f"""{opening}
 
 Where you are: the git worktree `{worktree}` of the repo `{repo_name}`, on branch `{branch}` (created from `{base}` for this item). This directory is yours: edit and commit here.
 
@@ -576,7 +589,7 @@ Rules. They are enforced by the runner and are not negotiable:
 9. This is a single headless pass: when your turn ends, the session ends. Never start background tasks or agents and then stop to wait for them. Run everything in the foreground and finish in one pass.
 10. The repo's human review and merge protocol does not apply here: do not post a merge recommendation, do not wait for a "do it", do not run pre-merge review steps meant for a human loop. The runner reviews the branch and a human decides in the morning.
 11. Scratch files go in the system temp directory, never in the worktree. Leave no untracked files behind: anything left is committed to the branch as-is and shows up in review.
-
+{continuation_rules}
 End your final message with exactly this block. The runner parses it:
 
 RUNNER-OUTCOME: done | held | failed
@@ -891,13 +904,15 @@ def _delete_branch(cfg: Config, repo: str, branch: str, action: str) -> bool:
     return git_ok(repo, "branch", "-D", branch)
 
 
-def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
-    """Work one planned item end-to-end. Returns {id, status, note, ...}. Never raises."""
+def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print, continuation: bool = False) -> dict:
+    """Work one new or existing branch end-to-end. Never merges or pushes."""
     # reviewer: None -> the council; False -> skipped (--no-council); callable -> injected (tests)
     if reviewer is None:
         reviewer = council_review
     item, iid = p.item, str(p.item["id"])
-    result = {"id": iid, "status": "open", "note": "", "branch": "", "council": "", "cost": 0.0, "session": ""}
+    result = {"id": iid, "status": "open", "note": "",
+              "branch": p.branch if continuation else "", "council": "",
+              "cost": 0.0, "session": ""}
     started = time.monotonic()
     if not _valid_item_id(iid):
         result.update(status="held", note="runner: invalid item ID; use a simple filename without path separators or traversal")
@@ -908,14 +923,31 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
         write_session_settings(cfg)
     try:
         git(p.repo, "worktree", "prune", check=False)
-        if p.reclaim:
-            _remove_worktree(p.repo, p.worktree)
-            if not _delete_branch(cfg, p.repo, p.branch, "reclaim-empty"):
-                raise GitError(f"could not reclaim empty leftover branch {p.branch}")
-        git(p.repo, "worktree", "add", "-q", "-b", p.branch, p.worktree, p.base)
+        if continuation:
+            existing = _worktree_for_branch(p.repo, p.branch)
+            if existing:
+                if os.path.realpath(existing["path"]) != os.path.realpath(p.worktree):
+                    raise GitError(f"branch {p.branch} is checked out outside runner isolation: {existing['path']}")
+            else:
+                git(p.repo, "worktree", "add", "-q", p.worktree, p.branch)
+            dirty = git(p.worktree, "status", "--porcelain", check=False).strip()
+            if dirty:
+                git(p.worktree, "add", "-A")
+                git(p.worktree, "-c", "user.name=backlog-run", "-c",
+                    "user.email=backlog-run@localhost", "commit", "-q", "-m",
+                    f"backlog-run: preserve dirty work before rework for {iid}")
+                if git(p.worktree, "status", "--porcelain", check=False).strip():
+                    raise GitError("could not snapshot pre-existing dirty work")
+        else:
+            if p.reclaim:
+                _remove_worktree(p.repo, p.worktree)
+                if not _delete_branch(cfg, p.repo, p.branch, "reclaim-empty"):
+                    raise GitError(f"could not reclaim empty leftover branch {p.branch}")
+            git(p.repo, "worktree", "add", "-q", "-b", p.branch, p.worktree, p.base)
     except GitError as e:
         result.update(status="held", note=f"runner: could not create worktree/branch: {e}")
-        _apply(cfg, result)
+        _apply(cfg, result, expected_statuses=(str(item.get("status")),) if continuation else ("open",),
+           expected_item=item if continuation else None)
         return result
     try:
         # Capture the declared checks before the session can do any work.
@@ -928,7 +960,8 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
             json.dump({"started_at": now_stamp(), "required_validations": required}, fh)
         env = scrubbed_env(p.repo, tool_path_dirs())
         prompt = compose_prompt(item, repo_name=os.path.basename(p.repo), worktree=p.worktree,
-                                branch=p.branch, base=p.base, minutes=max(5, cfg.item_timeout // 60 - 5))
+                                branch=p.branch, base=p.base, minutes=max(5, cfg.item_timeout // 60 - 5),
+                                continuation=continuation)
         log(f"  session: {p.branch} in {p.worktree} (timeout {cfg.item_timeout}s)")
         run = run_session(cfg, prompt, cwd=p.worktree, env=env, timeout=cfg.item_timeout)
         _write_json(run_path, {"argv_note": "claude -p (json)", "rc": run["rc"],
@@ -1028,6 +1061,7 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
                 cfg, iid=iid, stem=stem, sha=sha, kind=kind, required=required,
                 validations=validations, rev=rev)
             result["review_readiness"]["review_path"] = str(Path(cfg.reviews_dir) / f"{stem}.md")
+            result["reviewed_sha"] = sha
     except Exception as e:  # noqa: BLE001 — fail closed per item
         result.update(status="held", note=f"runner: internal error: {type(e).__name__}: {str(e)[:300]}")
         if git_ok(p.repo, "rev-list", "--count", f"{p.base}..{p.branch}") and \
@@ -1041,11 +1075,13 @@ def work_one(cfg: Config, p: Planned, *, reviewer=None, log=print) -> dict:
                     not _delete_branch(cfg, p.repo, p.branch, "work-empty"):
                 # not fatal: plan() reclaims an empty, worktree-less branch next run
                 result["note"] += f" (empty branch {p.branch} could not be deleted; reclaimed next run)"
-    _apply(cfg, result)
+    _apply(cfg, result, expected_statuses=(str(item.get("status")),) if continuation else ("open",),
+           expected_item=item if continuation else None)
     return result
 
 
-def _apply(cfg: Config, result: dict) -> None:
+def _apply(cfg: Config, result: dict, *, expected_statuses: tuple[str, ...] = ("open",),
+           expected_item: dict | None = None) -> None:
     """C4: write the item's new state (open stays open). Re-reads under the lock, and
     only transitions an item that is STILL `open` — if a human (or another tool) moved
     it during the session, their state wins and the run's result is recorded as a
@@ -1055,7 +1091,14 @@ def _apply(cfg: Config, result: dict) -> None:
 
     def fn(item: dict):
         current = item.get("status")
-        if current != "open":
+        direction_fields = ("repo", "title", "prompt", "note", "status", "branch", "required_validations")
+        revised = expected_item is not None and any(item.get(k) != expected_item.get(k) for k in direction_fields)
+        if revised:
+            item["runner_conflict"] = {"at": now_stamp(), "branch": result.get("branch"),
+                                       "status": result["status"], "note": result["note"][:1000]}
+            result["conflict"] = True
+            return
+        if current not in expected_statuses:
             item["note"] = (f"runner: CONFLICT — the run finished with {result['status']} but the item is "
                             f"now {current} (changed during the run); left as is."
                             + (f" Work is on branch {result['branch']}." if result.get("branch") else "")
@@ -1069,6 +1112,8 @@ def _apply(cfg: Config, result: dict) -> None:
             item.pop("branch", None)
         if result.get("council"):
             item["council"] = result["council"]
+        if result.get("reviewed_sha"):
+            item["reviewed_sha"] = result["reviewed_sha"]
         item["worked"] = today()
         item["note"] = result["note"]
         if result.get("session"):
@@ -1153,6 +1198,62 @@ def cmd_work(args, cfg: Config) -> int:
         print(summary)
         print(notify(cfg, summary))
     return 0
+
+
+def _rework_plan(cfg: Config, item: dict) -> Planned:
+    iid = str(item.get("id") or "")
+    if not _valid_item_id(iid):
+        raise ValueError("item ID is not safe for a branch or evidence path")
+    if item.get("status") not in ("held", "in_review"):
+        raise ValueError(f"item is {item.get('status')}, not held/in_review")
+    branch = item.get("branch")
+    if not isinstance(branch, str) or branch != branch_for(iid):
+        raise ValueError("item has no matching backlog-run branch")
+    repo = repo_path(cfg, item.get("repo"))
+    if not repo:
+        raise ValueError(f"repo {item.get('repo')!r} was not found")
+    if not git_ok(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"):
+        raise ValueError(f"branch {branch} does not exist")
+    base = default_branch_ref(repo)
+    if not base or base.startswith("origin/"):
+        raise ValueError("cannot resolve a local default branch")
+    worktree = os.path.join(repo, WORKTREE_DIRNAME, branch[len("claude/"):])
+    return Planned(item, "rework", repo=repo, branch=branch, worktree=worktree, base=base)
+
+
+def cmd_rework(args, cfg: Config) -> int:
+    if args.item_timeout is not None:
+        cfg.item_timeout = args.item_timeout
+    if args.budget_usd is not None:
+        cfg.budget_usd = args.budget_usd
+    if args.model:
+        cfg.model = args.model
+    if args.no_notify:
+        cfg.tg_enabled = False
+    cfg.keep_worktree = args.keep_worktree
+    with RunLock(cfg):
+        item = find_item(load_yaml(cfg.backlog_path), args.item)
+        if item is None:
+            print(f"rework {args.item}: not an active item", file=sys.stderr)
+            return 1
+        try:
+            planned = _rework_plan(cfg, item)
+        except ValueError as exc:
+            print(f"rework {args.item}: {exc}", file=sys.stderr)
+            return 1
+
+        # A Changes decision invalidates the old approval identity before any session starts.
+        mutate_backlog(cfg, args.item, lambda current: current.pop("reviewed_sha", None))
+        planned.item = find_item(load_yaml(cfg.backlog_path), args.item) or item
+        ensure_state(cfg)
+        write_session_settings(cfg)
+        result = work_one(cfg, planned, reviewer=(False if args.no_council else None),
+                          continuation=True)
+        write_report(cfg)
+        summary = summarize_run([result])
+        print(summary)
+        print(notify(cfg, summary))
+        return 0
 
 
 def summarize_run(results: list[dict], *, limit_hit: bool = False) -> str:
@@ -1355,7 +1456,8 @@ def _release_branch(cfg: Config, repo: str, branch: str, *, force: bool, action:
     return f"branch kept: git branch {flag} refused"
 
 
-def approve_one(cfg: Config, iid: str, *, log=print, allow_held: bool = False) -> bool:
+def approve_one(cfg: Config, iid: str, *, log=print, allow_held: bool = False,
+                expected_reviewed_sha: str | None = None) -> bool:
     doc = load_yaml(cfg.backlog_path)
     it = find_item(doc, iid)
     if not it:
@@ -1371,22 +1473,39 @@ def approve_one(cfg: Config, iid: str, *, log=print, allow_held: bool = False) -
         log(f"approve {iid}: repo {it.get('repo')!r} not found"); return False
     if not git_ok(rp, "show-ref", "--verify", "--quiet", f"refs/heads/{br}"):
         log(f"approve {iid}: branch {br} does not exist in {rp}"); return False
+    current_sha = git(rp, "rev-parse", f"refs/heads/{br}", check=False).strip()
+    reviewed_sha = expected_reviewed_sha or it.get("reviewed_sha")
+    if not isinstance(reviewed_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_sha) is None:
+        log(f"approve {iid}: no exact reviewed SHA is recorded; inspect the review, then supply --reviewed-sha <full SHA>")
+        return False
+    if current_sha.lower() != reviewed_sha.lower():
+        log(f"approve {iid}: branch changed since review ({reviewed_sha[:10]} -> {current_sha[:10]}); review the current work first")
+        return False
     base = default_branch_ref(rp)
     if not base or base.startswith("origin/"):
         log(f"approve {iid}: cannot resolve a local default branch in {rp}"); return False
     head = git(rp, "symbolic-ref", "--quiet", "--short", "HEAD", check=False).strip()
     if head != base:
         log(f"approve {iid}: main checkout of {os.path.basename(rp)} is on {head or 'detached HEAD'}, not {base}; switch it first"); return False
-    if git(rp, "status", "--porcelain", check=False).strip():
-        log(f"approve {iid}: main checkout of {os.path.basename(rp)} has uncommitted changes; commit or stash first"); return False
+    if not git_ok(rp, "diff", "--cached", "--quiet"):
+        log(f"approve {iid}: main checkout has staged changes; preserve them before merging this reviewed commit"); return False
+    if any(git_ok(rp, "rev-parse", "--quiet", "--verify", marker)
+           for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD")):
+        log(f"approve {iid}: another Git operation is in progress; finish it first"); return False
+    for marker in ("rebase-apply", "rebase-merge", "sequencer"):
+        marker_path = git(rp, "rev-parse", "--git-path", marker, check=False).strip()
+        if marker_path and os.path.exists(os.path.join(rp, marker_path)):
+            log(f"approve {iid}: a Git sequence is in progress; finish it first"); return False
+    # Git rejects overlapping unstaged/untracked work itself. Unrelated unstaged
+    # owner files remain untouched and must not become a blanket approval gate.
     msg = (f"Merge {br}: {it.get('title')}\n\nBacklog item {iid} (worked {it.get('worked')}, approved {today().isoformat()}).\n"
            f"Council: {str(it.get('council') or '')[:500]}\n\nBacklog-Item: {iid}\nBacklog-Branch: {br}\n")
     # Idempotent: a re-run after a failed push/archive must not merge twice.
-    if git_ok(rp, "merge-base", "--is-ancestor", br, base):
+    if git_ok(rp, "merge-base", "--is-ancestor", reviewed_sha, base):
         merged = "already merged"
     else:
         try:
-            git(rp, "merge", "--no-ff", "--no-edit", "-m", msg, br)
+            git(rp, "merge", "--no-ff", "--no-edit", "-m", msg, reviewed_sha)
         except GitError as e:
             git(rp, "merge", "--abort", check=False)
             log(f"approve {iid}: merge failed and was aborted — {e}"); return False
@@ -1406,6 +1525,8 @@ def approve_one(cfg: Config, iid: str, *, log=print, allow_held: bool = False) -
     def fn(item: dict):
         item["merged"] = today()
         item["merge_commit"] = merge_sha
+        item["reviewed_sha"] = reviewed_sha
+        item["review_identity_source"] = "owner-supplied" if expected_reviewed_sha else "runner-recorded"
     try:
         mutate_backlog(cfg, iid, fn, archive_as="done")
     except Exception as e:  # noqa: BLE001
@@ -1442,6 +1563,9 @@ def drop_one(cfg: Config, iid: str, *, log=print) -> bool:
 
 
 def cmd_approve(args, cfg: Config) -> int:
+    if getattr(args, "reviewed_sha", None) and len(args.items) != 1:
+        print("approve: --reviewed-sha applies to one exact item", file=sys.stderr)
+        return 1
     ok = True
     with RunLock(cfg):
         for tok in args.items:
@@ -1449,7 +1573,8 @@ def cmd_approve(args, cfg: Config) -> int:
                 iid = resolve_ref(cfg, tok)
             except KeyError as e:
                 print(f"approve {tok}: {e}"); ok = False; continue
-            ok = approve_one(cfg, iid, allow_held=args.held) and ok
+            ok = approve_one(cfg, iid, allow_held=args.held,
+                             expected_reviewed_sha=getattr(args, "reviewed_sha", None)) and ok
         write_report(cfg)
     return 0 if ok else 1
 
@@ -1524,6 +1649,16 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--keep-worktree", action="store_true", help="leave the session worktree in place")
     w.set_defaults(func=cmd_work)
 
+    rw = sub.add_parser("rework", help="continue one held/in_review item on its existing branch")
+    rw.add_argument("item", help="active item id")
+    rw.add_argument("--item-timeout", type=int, default=None, help="seconds for the session (default 3600)")
+    rw.add_argument("--budget-usd", type=float, default=None, help="--max-budget-usd for the session (default 20; 0 = none)")
+    rw.add_argument("--model", help="model for the session (default: the CLI default)")
+    rw.add_argument("--no-council", action="store_true", help="skip the council review (tests/debugging)")
+    rw.add_argument("--no-notify", action="store_true", help="no Telegram summary")
+    rw.add_argument("--keep-worktree", action="store_true", help="leave the session worktree in place")
+    rw.set_defaults(func=cmd_rework)
+
     r = sub.add_parser("report", help="write + print the morning report"); r.set_defaults(func=cmd_report)
     ls = sub.add_parser("list", help="one line per active item"); ls.set_defaults(func=cmd_list)
     sh = sub.add_parser("show", help="item details + council review"); sh.add_argument("item"); sh.set_defaults(func=cmd_show)
@@ -1531,6 +1666,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("approve", help="merge + push + delete branch; archive as done (human command)")
     ap.add_argument("items", nargs="+", help="report numbers or item ids")
     ap.add_argument("--held", action="store_true", help="also allow merging a held item's branch (read its note first)")
+    ap.add_argument("--reviewed-sha", help="exact full commit SHA reviewed by the owner (one item only)")
     ap.set_defaults(func=cmd_approve)
     dr = sub.add_parser("drop", help="delete the branch (journaled); archive as dropped")
     dr.add_argument("items", nargs="+", help="report numbers or item ids"); dr.set_defaults(func=cmd_drop)
@@ -1550,12 +1686,12 @@ def main(argv=None) -> int:
         pass
     args = build_parser().parse_args(argv)
     cfg = Config()
-    if args.cmd == "work":
-        if args.max_items is not None:
+    if args.cmd in ("work", "rework"):
+        if getattr(args, "max_items", None) is not None:
             cfg.max_items = args.max_items
         if args.item_timeout is not None:
             cfg.item_timeout = args.item_timeout
-        if args.deadline is not None:
+        if getattr(args, "deadline", None) is not None:
             cfg.deadline = args.deadline
         if args.budget_usd is not None:
             cfg.budget_usd = args.budget_usd

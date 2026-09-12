@@ -51,7 +51,17 @@ def load_state(path) -> dict:
 
 
 def save_state(path, state: dict) -> None:
-    Path(path).write_text(json.dumps(state, indent=2) + "\n")
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    with tmp.open('w') as handle:
+        handle.write(json.dumps(state, indent=2) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp.replace(target)
+    fd = os.open(target.parent, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
 
 
 def _read(path) -> str | None:
@@ -214,35 +224,115 @@ def format_report(fired: list[CheckStatus]) -> str:
     return "\n".join(lines)
 
 
+def stage_delivery(path, fired, candidate_state: dict, now_epoch: int) -> str:
+    """Persist a detected alert before its outward delivery is attempted."""
+    import uuid
+    attempt_id = uuid.uuid4().hex
+    record = {
+        "version": 1,
+        "attempt_id": attempt_id,
+        "detected_at": now_epoch,
+        "fired": [{"name": s.name, "level": s.level, "summary": s.summary,
+                   "evidence": s.evidence} for s in fired],
+        "candidate_suppression_state": candidate_state,
+        "delivery": {"status": "pending"},
+    }
+    save_state(path, record)
+    return attempt_id
+
+
+def record_delivery(pending_path, state_path, last_path, attempt_id: str,
+                    status: str, provider_receipt=None) -> None:
+    """Finish a staged delivery without confusing acceptance with human receipt."""
+    if status not in {"accepted", "failed", "uncertain", "attempting"}:
+        raise ValueError("invalid delivery status")
+    pending = load_state(pending_path)
+    if pending.get("attempt_id") != attempt_id:
+        raise ValueError("watchdog delivery attempt does not match pending record")
+    delivery = {"status": status}
+    if status == "accepted":
+        if (not isinstance(provider_receipt, dict)
+                or provider_receipt.get("ok") is not True
+                or provider_receipt.get("status") != "accepted"
+                or not isinstance(provider_receipt.get("message_ids"), list)
+                or not provider_receipt["message_ids"]
+                or any(not isinstance(value, int) or isinstance(value, bool)
+                       for value in provider_receipt["message_ids"])):
+            raise ValueError("accepted delivery requires a provider receipt")
+        delivery["provider_receipt"] = provider_receipt
+    pending["delivery"] = delivery
+    if status == "accepted":
+        save_state(pending_path, pending)
+        save_state(last_path, pending)
+        save_state(state_path, pending["candidate_suppression_state"])
+        Path(pending_path).unlink()
+    else:
+        save_state(pending_path, pending)
+
+def _same_fired(pending: dict, fired) -> bool:
+    old = [(item.get("name"), item.get("level")) for item in pending.get("fired", [])]
+    new = [(item.name, item.level) for item in fired]
+    return old == new
+
+
 def main(argv=None) -> int:
-    state_path = BASE / "watchdog" / "state.json"
-    if os.environ.get("WATCHDOG_STATE"):
-        state_path = Path(os.environ["WATCHDOG_STATE"])
-    metrics_path = Path(os.environ.get("WATCHDOG_METRICS",
-                                       str(BASE / "watchdog" / "metrics-history.json")))
+    argv = list(argv or [])
+    state_path = Path(os.environ.get("WATCHDOG_STATE", str(BASE / "watchdog" / "state.json")))
+    pending_path = Path(os.environ.get("WATCHDOG_PENDING", str(BASE / "watchdog" / "delivery-pending.json")))
+    last_path = Path(os.environ.get("WATCHDOG_DELIVERY_LAST", str(BASE / "watchdog" / "delivery-last.json")))
+    metrics_path = Path(os.environ.get("WATCHDOG_METRICS", str(BASE / "watchdog" / "metrics-history.json")))
+
+    if argv and argv[0] == "--record-delivery":
+        if len(argv) not in (3, 4):
+            print("usage: --record-delivery accepted|failed|uncertain ATTEMPT_ID [RECEIPT_JSON]", file=sys.stderr)
+            return 2
+        receipt = json.loads(argv[3]) if len(argv) == 4 else None
+        record_delivery(pending_path, state_path, last_path, argv[2], argv[1], receipt)
+        return 0
+
+    dry_run = "--dry-run" in argv
+    pending = load_state(pending_path)
+    if not dry_run and pending.get("delivery", {}).get("status") == "accepted":
+        # Complete interrupted local persistence from an already accepted receipt; never resend.
+        record_delivery(pending_path, state_path, last_path, pending['attempt_id'], 'accepted',
+                        pending['delivery'].get('provider_receipt'))
     now = int(time.time())
     prior_metrics = load_state(metrics_path)
     statuses, new_metrics = collect(now, prior_metrics)
-    save_state(metrics_path, new_metrics)
-    prior = load_state(state_path)
-    result = triage(statuses, prior, now)
-    save_state(state_path, result["state"])
-
+    if not dry_run: save_state(metrics_path, new_metrics)
+    result = triage(statuses, load_state(state_path), now)
     fired = result["fired"]
+    attempt_id = None
+    delivery_uncertain = False
+    if result["escalate"]:
+        pending = load_state(pending_path)
+        if pending.get("delivery", {}).get("status") in ("attempting", "uncertain") and _same_fired(pending, fired):
+            delivery_uncertain = True
+        elif not dry_run:
+            attempt_id = stage_delivery(pending_path, fired, result["state"], now)
+    elif not dry_run:
+        save_state(state_path, result["state"])
+        if pending_path.exists() and all(s.level == "ok" for s in statuses):
+            resolved = load_state(pending_path)
+            resolved["resolved_at"] = now
+            save_state(last_path, resolved)
+            pending_path.unlink()
+
     if fired:
         print(format_report(fired))
     else:
         print("all checks ok" if all(s.level == "ok" for s in statuses)
               else "issues present but suppressed (within cooldown)")
-
-    # Log every metric value on every poll — this is how we bank a baseline to tune
-    # the (currently hard-coded) budgets and add statistical thresholds later.
+    if delivery_uncertain:
+        print("watchdog alert delivery remains uncertain; inspect the pending record before retry")
     if new_metrics:
         readings = " ".join(f"{k}={v.get('value')}" for k, v in sorted(new_metrics.items()))
         print("WATCHDOG_METRICS:" + readings)
 
     payload = {
-        "escalate": result["escalate"],
+        "escalate": result["escalate"] and not delivery_uncertain,
+        "attempt_id": attempt_id,
+        "delivery_uncertain": delivery_uncertain,
         "fired": [{"name": s.name, "level": s.level, "summary": s.summary,
                    "evidence": s.evidence} for s in fired],
         "checked": len(statuses),

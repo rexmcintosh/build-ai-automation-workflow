@@ -1,26 +1,19 @@
-import { existsSync } from 'node:fs'
 import { loadConfig, loadToken } from './config'
 import { Telegram } from './telegram'
-import { loadState, saveState, setPending, pendingPath } from './state'
+import { loadState, saveState, setPending, pendingIsFresh } from './state'
 import { planSync, debounceCloses } from './sync'
-import { listSessions, capturePane, classify, inject, pressKey } from './tmux'
-import { handleUpdate, blockedPrompt, armTopic, type RouterDeps } from './router'
+import { listSessions, capturePane, classify, inject, pressKey, sessionGeneration } from './tmux'
+import { handleUpdate, displayBlockedPrompt, type RouterDeps } from './router'
 
 const config = loadConfig()
 const tg = new Telegram(loadToken())
 const state = loadState()
-
-// Sessions whose topics were open but missing from the previous sync's session list.
-// A close only fires on the second consecutive miss, so one failed `tmux ls` (which
-// returns an empty list) cannot archive every tab.
 let prevMissing = new Set<string>()
 
 async function runSync(): Promise<void> {
   const actions = planSync(listSessions(), state.topics, config.excludeRegexps)
   const { execute, nextMissing } = debounceCloses(actions, prevMissing)
   prevMissing = nextMissing
-  // Persist after every single action: a Telegram failure mid-loop must not lose the
-  // topics already created, or the next sync would create duplicates.
   for (const a of execute) {
     if (a.kind === 'create') {
       const topicId = await tg.createTopic(config.groupId, a.session)
@@ -36,18 +29,13 @@ async function runSync(): Promise<void> {
   }
 }
 
-// One guard for both callers (timer and post-update), so they never overlap.
 let syncing = false
 async function syncNow(label: string): Promise<void> {
   if (syncing) return
   syncing = true
-  try {
-    await runSync()
-  } catch (e) {
-    console.error(`session-bridge: ${label} error: ${e}`)
-  } finally {
-    syncing = false
-  }
+  try { await runSync() }
+  catch (e) { console.error(`session-bridge: ${label} error: ${e}`) }
+  finally { syncing = false }
 }
 
 const deps: RouterDeps = {
@@ -55,21 +43,28 @@ const deps: RouterDeps = {
   topics: () => state.topics,
   classify: s => classify(capturePane(s)),
   capture: capturePane,
+  generation: sessionGeneration,
   inject,
   pressKey,
   reply: (threadId, text) => tg.send(config.groupId, threadId, text),
   setPending,
+  approval: threadId => state.approvals[String(threadId)],
+  saveApproval: (threadId, binding) => {
+    if (binding) state.approvals[String(threadId)] = binding
+    else delete state.approvals[String(threadId)]
+    saveState(state)
+  },
+  actionOutcome: updateId => state.actions[String(updateId)],
+  recordAction: (updateId, outcome) => {
+    state.actions[String(updateId)] = outcome
+    saveState(state)
+  },
 }
 
-// Sync on a timer; the event loop interleaves this with the long poll below.
-setInterval(() => {
-  void syncNow('sync')
-}, config.topicSyncIntervalSec * 1000)
+setInterval(() => { void syncNow('sync') }, config.topicSyncIntervalSec * 1000)
 
-// Blocked-watcher: a session the user is mid-conversation with (pending flag
-// set) that freezes on a permission/question modal can't announce itself — no
-// Stop fires while it waits. Watch flagged sessions and proactively post the
-// armed prompt to their tab, once per blocked episode (edge-triggered).
+// Add suppression only after Telegram accepts the exact prompt. Failed sends
+// remain eligible on the next existing tick. Old pending flags do not arm.
 const blockedNotified = new Set<string>()
 let watching = false
 setInterval(() => {
@@ -77,18 +72,19 @@ setInterval(() => {
   watching = true
   void (async () => {
     try {
-      for (const [session, t] of Object.entries(state.topics)) {
-        if (t.status !== 'open' || !existsSync(pendingPath(session))) continue
+      for (const [session, topic] of Object.entries(state.topics)) {
+        if (topic.status !== 'open' || !pendingIsFresh(session)) continue
         const pane = capturePane(session)
         if (classify(pane) !== 'BLOCKED') {
           blockedNotified.delete(session)
           continue
         }
         if (blockedNotified.has(session)) continue
-        blockedNotified.add(session)
-        armTopic(t.topicId)
-        await tg.send(config.groupId, t.topicId, blockedPrompt(session, pane ?? ''))
-        console.error(`session-bridge: posted blocked prompt for ${session}`)
+        const binding = await displayBlockedPrompt(session, topic.topicId, deps)
+        if (binding) {
+          blockedNotified.add(session)
+          console.error(`session-bridge: posted blocked prompt for ${session}`)
+        }
       }
     } catch (e) {
       console.error(`session-bridge: blocked-watch error: ${e}`)
@@ -104,20 +100,17 @@ await syncNow('initial sync')
 while (true) {
   try {
     const updates = await tg.getUpdates(state.offset, config.pollTimeoutSec)
-    for (const u of updates) {
-      state.offset = Math.max(state.offset, u.update_id + 1)
-      try {
-        await handleUpdate(u, deps)
-      } catch (e) {
-        console.error(`session-bridge: handler error: ${e}`)
-      }
-      // Persist per update, not per batch, to shrink the crash replay window.
+    for (const update of updates) {
+      if (update.update_id < state.offset) continue
+      // Router writes attempting before tmux. Only a fully handled update may
+      // advance the offset. A failed state write stops later updates.
+      await handleUpdate(update, deps)
+      state.offset = Math.max(state.offset, update.update_id + 1)
       saveState(state)
     }
-    // Sync on every update batch: picks up new tabs and archives GONE ones promptly.
     if (updates.length > 0) await syncNow('post-update sync')
   } catch (e) {
-    console.error(`session-bridge: poll error: ${e}`)
+    console.error(`session-bridge: poll/handler error: ${e}`)
     await Bun.sleep(5000)
   }
 }

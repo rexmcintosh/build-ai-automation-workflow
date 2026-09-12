@@ -8,13 +8,13 @@ function tmp(): string { return mkdtempSync(join(tmpdir(), 'sb-state-')) }
 
 test('loadState returns empty state when file is absent', () => {
   const s = loadState(tmp())
-  expect(s).toEqual({ offset: 0, topics: {} })
+  expect(s).toEqual({ version: 2, offset: 0, topics: {}, approvals: {}, actions: {} })
 })
 
 test('saveState/loadState round-trips', () => {
   const d = tmp()
-  saveState({ offset: 42, topics: { 'loom-14': { topicId: 7, status: 'open' } } }, d)
-  expect(loadState(d)).toEqual({ offset: 42, topics: { 'loom-14': { topicId: 7, status: 'open' } } })
+  saveState({ version: 2, offset: 42, approvals: {}, actions: {}, topics: { 'loom-14': { topicId: 7, status: 'open' } } }, d)
+  expect(loadState(d)).toEqual({ version: 2, offset: 42, approvals: {}, actions: {}, topics: { 'loom-14': { topicId: 7, status: 'open' } } })
 })
 
 test('setPending writes topicId, a timestamp and remaining=1 by default', () => {
@@ -45,7 +45,7 @@ test('sanitizeSession never yields a dots-only name', () => {
 
 test('saveState leaves no temp file behind', () => {
   const d = tmp()
-  saveState({ offset: 1, topics: {} }, d)
+  saveState({ version: 2, offset: 1, topics: {}, approvals: {}, actions: {} }, d)
   expect(existsSync(join(d, 'state.json'))).toBe(true)
   expect(existsSync(join(d, 'state.json.tmp'))).toBe(false)
   expect(loadState(d).offset).toBe(1)

@@ -453,6 +453,12 @@ def test_dry_run_changes_nothing(world, capsys):
 # ----------------------------------------------------------------------------- morning review
 
 
+def mark_reviewed(cfg, repo: Path, branch: str, iid: str) -> str:
+    sha = git(repo, "rev-parse", branch).strip()
+    br.mutate_backlog(cfg, iid, lambda it: it.update(reviewed_sha=sha))
+    return sha
+
+
 def worked_branch(repo: Path, branch: str, fname="feature.txt", content="feature\n"):
     git(repo, "worktree", "add", "-q", "-b", branch, str(repo / ".claude" / "worktrees" / branch.split("/")[-1]), "main")
     wt = repo / ".claude" / "worktrees" / branch.split("/")[-1]
@@ -466,6 +472,7 @@ def test_approve_merges_pushes_deletes_branch_and_archives(world):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a",
                             worked=date(2026, 1, 2), council="stub verdict")])
     worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     br.write_report(cfg)
     assert br.resolve_ref(cfg, "1") == "2026-01-01-a"
     assert br.approve_one(cfg, "2026-01-01-a", log=lambda *a: None)
@@ -485,13 +492,15 @@ def test_approve_merges_pushes_deletes_branch_and_archives(world):
     assert "-> done" in git(cfg.backlog_dir, "log", "-1", "--format=%s")
 
 
-def test_approve_refuses_dirty_main_checkout(world):
+def test_approve_refuses_staged_changes_in_main_checkout(world):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
     worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     (world.repo / "README.md").write_text("dirty\n")
+    git(world.repo, "add", "README.md")
     msgs = []
     assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
-    assert "uncommitted changes" in msgs[-1]
+    assert "staged changes" in msgs[-1]
     assert load_items(cfg)[0]["status"] == "in_review"
     assert git(world.repo, "rev-list", "--count", "origin/main..main").strip() == "0"
 
@@ -499,6 +508,7 @@ def test_approve_refuses_dirty_main_checkout(world):
 def test_approve_refuses_wrong_branch_checked_out(world):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
     worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     git(world.repo, "checkout", "-q", "-b", "feature-x")
     msgs = []
     assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
@@ -508,6 +518,7 @@ def test_approve_refuses_wrong_branch_checked_out(world):
 def test_approve_aborts_on_conflict(world):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
     worked_branch(world.repo, "claude/bl-a", fname="README.md", content="branch version\n")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     (world.repo / "README.md").write_text("main version\n")
     git(world.repo, "commit", "-qam", "main moves on")
     msgs = []
@@ -522,6 +533,7 @@ def test_approve_aborts_on_conflict(world):
 def test_approve_keeps_branch_when_its_worktree_is_dirty(world):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
     wt = worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     (wt / "scratch.txt").write_text("uncommitted\n")
     msgs = []
     assert br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
@@ -534,9 +546,57 @@ def test_approve_without_remote_is_local_only(world):
     repo = make_repo(world.root, "beta", remote=False)
     cfg = world.build([item("2026-01-01-b", repo="beta", status="in_review", branch="claude/bl-b")])
     worked_branch(repo, "claude/bl-b")
+    mark_reviewed(cfg, repo, "claude/bl-b", "2026-01-01-b")
     msgs = []
     assert br.approve_one(cfg, "2026-01-01-b", log=msgs.append)
     assert "no remote — local only" in msgs[-1]
+
+
+def test_approve_refuses_missing_or_stale_reviewed_sha(world):
+    cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
+    worked_branch(world.repo, "claude/bl-a")
+    msgs = []
+    assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
+    assert "no exact reviewed SHA" in msgs[-1]
+    br.mutate_backlog(cfg, "2026-01-01-a", lambda it: it.update(reviewed_sha="0" * 40))
+    assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
+    assert "changed since review" in msgs[-1]
+    assert git(world.repo, "rev-list", "--count", "origin/main..main").strip() == "0"
+
+
+def test_approve_uses_exact_version_without_making_readiness_a_gate(world):
+    cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
+    worked_branch(world.repo, "claude/bl-a")
+    reviewed = git(world.repo, "rev-parse", "claude/bl-a").strip()
+    br.mutate_backlog(cfg, "2026-01-01-a", lambda it: it.update(reviewed_sha=reviewed))
+    # No structured readiness record exists. Exact identity is mandatory; readiness stays advisory.
+    assert br._review_readiness(cfg, load_items(cfg)[0])["status"] == "unknown"
+    assert br.approve_one(cfg, "2026-01-01-a", log=lambda *a: None)
+
+
+def test_rework_reuses_branch_preserves_dirty_work_and_runner_contracts(world):
+    cfg = world.build([item("2026-01-01-a", status="held", branch="claude/bl-a",
+                            note="Rex requested changes", required_validations=[])])
+    wt = worked_branch(world.repo, "claude/bl-a")
+    prior = git(world.repo, "rev-parse", "claude/bl-a").strip()
+    (wt / "dirty-before-rework.txt").write_text("keep me\n")
+    args = br.build_parser().parse_args([
+        "rework", "2026-01-01-a", "--no-notify", "--no-council",
+        "--item-timeout", "29", "--budget-usd", "3.5",
+    ])
+    assert br.cmd_rework(args, cfg) == 0
+    (updated,) = load_items(cfg)
+    head = git(world.repo, "rev-parse", "claude/bl-a").strip()
+    assert updated["status"] == "in_review" and updated["reviewed_sha"] == head
+    assert git(world.repo, "merge-base", "--is-ancestor", prior, head, check=False) == ""
+    assert "dirty-before-rework.txt" in git(world.repo, "diff", "--name-only", "main...claude/bl-a")
+    assert git(world.repo, "rev-list", "--count", "origin/main..main").strip() == "0"
+    cap = world.capture()
+    assert "Continue the existing branch" in cap["prompt"]
+    assert "Never replay a possibly completed external action" in cap["prompt"]
+    assert "Changes and a resource budget do not grant merge permission" in cap["prompt"]
+    assert "--max-budget-usd" in cap["argv"] and "3.5" in cap["argv"]
+    assert cap["push_rc"] != 0 and "nonexistent" in cap["push_err"]
 
 
 def test_drop_deletes_branch_journals_and_archives(world):
@@ -646,6 +706,7 @@ def test_apply_does_not_clobber_a_status_changed_during_the_run(world):
 def test_approve_records_before_releasing_branch(world, monkeypatch):
     cfg = world.build([item("2026-01-01-a", status="in_review", branch="claude/bl-a")])
     worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
 
     def boom(*a, **kw):
         raise RuntimeError("disk full")
@@ -692,6 +753,7 @@ def test_run_lock_contention_exits_75(world):
 def test_approve_refuses_held_unless_flagged(world):
     cfg = world.build([item("2026-01-01-a", status="held", branch="claude/bl-a", note="runner: HELD — needs key")])
     worked_branch(world.repo, "claude/bl-a")
+    mark_reviewed(cfg, world.repo, "claude/bl-a", "2026-01-01-a")
     msgs = []
     assert not br.approve_one(cfg, "2026-01-01-a", log=msgs.append)
     assert "re-run with --held" in msgs[-1]
@@ -972,3 +1034,82 @@ def test_markdown_validation_marker_retains_evidence(world):
     captured = br._capture_validations(cfg, "fixture", "**RUNNER-VALIDATIONS:** " + json.dumps(payload))
     assert len(captured) == 1
     assert (Path(cfg.state_dir) / captured[0]["evidence_path"]).read_text() == "check exited 0"
+
+
+def test_owner_can_supply_reviewed_identity_for_legacy_item(world):
+    cfg = world.build([item('2026-01-01-a', status='in_review', branch='claude/bl-a')])
+    worked_branch(world.repo, 'claude/bl-a')
+    sha = git(world.repo, 'rev-parse', 'claude/bl-a').strip()
+    assert br.approve_one(cfg, '2026-01-01-a', expected_reviewed_sha=sha, log=lambda *a: None)
+    archived = br.load_yaml(cfg.archive_path)['items'][0]
+    assert archived['reviewed_sha'] == sha
+    assert archived['review_identity_source'] == 'owner-supplied'
+
+
+def test_approval_merges_only_reviewed_commit_if_branch_moves_during_action(world, monkeypatch):
+    cfg = world.build([item('2026-01-01-a', status='in_review', branch='claude/bl-a')])
+    wt = worked_branch(world.repo, 'claude/bl-a')
+    mark_reviewed(cfg, world.repo, 'claude/bl-a', '2026-01-01-a')
+    real_git = br.git
+    advanced = False
+    def racing_git(repo, *args, **kwargs):
+        nonlocal advanced
+        if args[:2] == ('merge', '--no-ff') and not advanced:
+            advanced = True
+            (wt / 'not-reviewed.txt').write_text('must stay off main')
+            git(wt, 'add', 'not-reviewed.txt'); git(wt, 'commit', '-qm', 'concurrent work')
+        return real_git(repo, *args, **kwargs)
+    monkeypatch.setattr(br, 'git', racing_git)
+    assert br.approve_one(cfg, '2026-01-01-a', log=lambda *a: None)
+    assert advanced
+    assert not (world.repo / 'not-reviewed.txt').exists()
+    assert git(world.repo, 'branch', '--list', 'claude/bl-a').strip()
+
+
+def test_rework_preserves_owner_revision_made_without_status_change(world):
+    cfg = world.build([item('2026-01-01-a', status='held', branch='claude/bl-a', note='First request')])
+    worked_branch(world.repo, 'claude/bl-a')
+    initial = load_items(cfg)[0]
+    planned = br._rework_plan(cfg, initial)
+    def review(*args, **kwargs):
+        br.mutate_backlog(cfg, initial['id'], lambda row: row.update(prompt='Revised owner scope', note='Use this newer evidence'))
+        return stub_reviewer(*args, **kwargs)
+    result = br.work_one(cfg, planned, reviewer=review, continuation=True, log=lambda *a: None)
+    row = load_items(cfg)[0]
+    assert row['status'] == 'held'
+    assert row['prompt'] == 'Revised owner scope'
+    assert 'Use this newer evidence' in row['note']
+    assert result['conflict'] and row['runner_conflict']['branch'] == 'claude/bl-a'
+    assert not row.get('reviewed_sha')
+
+
+def test_approval_preserves_unrelated_unstaged_work(world):
+    cfg = world.build([item('2026-01-01-a', status='in_review', branch='claude/bl-a')])
+    worked_branch(world.repo, 'claude/bl-a')
+    sha = git(world.repo, 'rev-parse', 'claude/bl-a').strip()
+    br.mutate_backlog(cfg, '2026-01-01-a', lambda row: row.update(reviewed_sha=sha))
+    (world.repo / 'README.md').write_text('Owner notes still in progress\n')
+    assert br.approve_one(cfg, '2026-01-01-a', log=lambda *a:None)
+    assert (world.repo / 'README.md').read_text() == 'Owner notes still in progress\n'
+    assert git(world.repo, 'show', 'HEAD:README.md').strip() == 'hello'
+
+
+def test_approval_never_overwrites_overlapping_owner_work(world):
+    cfg = world.build([item('2026-01-01-a', status='in_review', branch='claude/bl-a')])
+    worked_branch(world.repo, 'claude/bl-a', fname='README.md', content='Reviewed change\n')
+    sha = git(world.repo, 'rev-parse', 'claude/bl-a').strip()
+    br.mutate_backlog(cfg, '2026-01-01-a', lambda row: row.update(reviewed_sha=sha))
+    (world.repo / 'README.md').write_text('Unfinished owner edit\n')
+    assert not br.approve_one(cfg, '2026-01-01-a', log=lambda *a:None)
+    assert (world.repo / 'README.md').read_text() == 'Unfinished owner edit\n'
+    assert git(world.repo, 'show', 'HEAD:README.md').strip() == 'hello'
+
+
+def test_approval_preserves_an_in_progress_git_sequence(world):
+    cfg = world.build([item('2026-01-01-a', status='in_review', branch='claude/bl-a')])
+    worked_branch(world.repo, 'claude/bl-a')
+    mark_reviewed(cfg, world.repo, 'claude/bl-a', '2026-01-01-a')
+    sequence = world.repo / '.git' / 'rebase-apply'
+    sequence.mkdir()
+    assert not br.approve_one(cfg, '2026-01-01-a', log=lambda *a:None)
+    assert sequence.is_dir() and load_items(cfg)[0]['status'] == 'in_review'
