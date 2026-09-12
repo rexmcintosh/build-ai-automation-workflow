@@ -116,3 +116,21 @@ one item, not two waves.
   behavior is inferred from the shim source plus today's regression-check runs.
 - Repos outside `~/projects` (if any run the gate) are not covered; nothing in
   memory or CLAUDE.md names one.
+
+---
+
+## Disposition of the structural recommendation — 2026-09-12
+
+**Reversed.** Step 3 (`council-ci-review`, v0.5.0) shipped 2026-08-02; step 4
+(the fleet pass) never ran. On 2026-08-20 a fleet pass rolled hardening round 3
+out to all 18 copies of `scripts/venice_review.py` instead, and the packaged
+shim went six weeks without rounds 2 and 3 while remaining installed and
+callable on every runner.
+
+`council/ci_review.py` and the `council-ci-review` entry point are deleted.
+Per-repo `scripts/venice_review.py` is the canonical shim. Evidence, the file
+diff, and what reviving the migration would involve:
+[`venice-review-shim-disposition-2026-09-12.md`](venice-review-shim-disposition-2026-09-12.md).
+
+Backlog item `2026-07-23-venice-review-fleet-pass` cites this document as its
+spec and is invalid as written.

@@ -1,14 +1,15 @@
 diff --git a/.github/workflows/venice-review.yml b/.github/workflows/venice-review.yml
-index 34b4d7f..5ebfbef 100644
+index 3ce3032..d1ec9ff 100644
 --- a/.github/workflows/venice-review.yml
 +++ b/.github/workflows/venice-review.yml
-@@ -23,11 +23,16 @@ jobs:
+@@ -23,12 +23,16 @@ jobs:
          with:
            python-version: "3.12"
  
 -      # Pinned to the council-v0.4.0 commit SHA so the merge gate is reproducible
 -      # Bump intentionally on each council release. (When published to PyPI,
 -      # simplify to a pinned: pip install "council==X.Y.Z".)
+-      # v0.4.0: grounded, chair-arbitrated gate — needs the file-context shim below.
 +      # Pinned to a commit SHA so the merge gate is reproducible.
 +      # This pin is NOT optional for the usage steps below: council-v0.4.0
 +      # (4a01298) packaged `council` alone, so it ships no venice_usage — the
@@ -23,10 +24,10 @@ index 34b4d7f..5ebfbef 100644
  
        - name: Compute diff
          id: diff
-@@ -42,4 +47,30 @@ jobs:
-           PR_NUMBER: ${{ github.event.pull_request.number }}
-           REPO: ${{ github.repository }}
-           DIFF_PATH: /tmp/pr.diff
+@@ -69,4 +73,30 @@ jobs:
+           # Set repo/org variable COUNCIL_ENFORCE=0 to run advisory (post comment, never
+           # fail on findings) during calibration. Engine/infra failures still fail closed.
+           COUNCIL_ENFORCE: ${{ vars.COUNCIL_ENFORCE || '1' }}
 +          # Put the usage ledger somewhere we can find it again. Without this it
 +          # lands in the runner's $HOME and dies with the job.
 +          VENICE_USAGE_DB: ${{ runner.temp }}/venice-usage.db

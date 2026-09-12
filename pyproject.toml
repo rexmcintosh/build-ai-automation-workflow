@@ -10,7 +10,6 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 council = "council.cli:main"
-council-ci-review = "council.ci_review:main"
 diem = "diem.cli:main"
 session-gc = "sessiongc.cli:main"
 backlog-run = "backlogrun.cli:main"
