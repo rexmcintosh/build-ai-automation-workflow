@@ -229,106 +229,133 @@ def test_morning_report_fires_with_midnight_reset(tmp_path, monkeypatch):
     assert len(sent) == 2 and "Report" in sent[1]
 
 
-def test_venice_usage_reconciles_ledger_vs_venice(tmp_path, monkeypatch, capsys):
-    cfgp = _cfg_file(tmp_path)
-    db = tmp_path / "ledger.db"; monkeypatch.setenv("VENICE_USAGE_DB", str(db))
-    from venice_usage.ledger import append
-    append(project="romance", task_type="draft", model="m", usd=1.00,
-           ts="2026-07-18T02:00:00", db_path=db)
-    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 18, 12, 0))
-    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+
+
+# --- venice-usage: a real window, and a model axis both sides share ---------
+# The old command read `trailingSevenDays` off /api_keys, so --days was decor.
+# The rewrite reads /billing/usage-history over the window actually asked for.
+# Bills carry no key or project tag, so the project table is ledger-only and
+# the ledger-vs-billed comparison happens per model.
+
+def _fake_billing(monkeypatch, by_model, seen=None):
     class FakeUsage:
-        def __init__(self, *a, **k): pass
-        def per_key_usage(self):
-            return [{"key_id": "k1", "key_name": "proj-romance", "usd": 1.10, "diem": 4.0}]
+        def __init__(self, *a, **k):
+            pass
+
+        def billed_by_model(self, *, start, end):
+            if seen is not None:
+                seen.append((start, end))
+            return by_model
     monkeypatch.setattr(cli, "UsageClient", FakeUsage)
-    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0
-    out = capsys.readouterr().out
-    assert "romance" in out and "1.00" in out and "1.10" in out  # ledger vs venice
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+
+
+def test_venice_usage_asks_venice_for_the_window_days_names(tmp_path, monkeypatch,
+                                                            capsys):
+    cfgp = _cfg_file(tmp_path)
+    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "ledger.db"))
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 9, 12, 12, 0))
+    seen = []
+    _fake_billing(monkeypatch, {}, seen)
+    assert cli.main(["venice-usage", "--days", "1", "--config", str(cfgp)]) == 0
+    assert cli.main(["venice-usage", "--days", "7", "--config", str(cfgp)]) == 0
+    assert seen[0][0] == datetime(2026, 9, 11, 12, 0)
+    assert seen[1][0] == datetime(2026, 9, 5, 12, 0)
+    assert seen[0][1] == seen[1][1] == datetime(2026, 9, 12, 12, 0)
+
+
+def test_venice_usage_days_changes_the_numbers_it_prints(tmp_path, monkeypatch,
+                                                         capsys):
+    cfgp = _cfg_file(tmp_path)
+    db = tmp_path / "ledger.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(db))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.00,
+           ts="2026-09-06T02:00:00", db_path=db)      # inside 7d, outside 1d
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 9, 12, 12, 0))
+
+    class Windowed:
+        def __init__(self, *a, **k):
+            pass
+
+        def billed_by_model(self, *, start, end):
+            days = (end - start).days
+            return {"m": {"diem": 1.0 * days, "calls": days}}
+    monkeypatch.setattr(cli, "UsageClient", Windowed)
+    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
+
+    cli.main(["venice-usage", "--days", "1", "--json", "--config", str(cfgp)])
+    one = json.loads(capsys.readouterr().out)
+    cli.main(["venice-usage", "--days", "7", "--json", "--config", str(cfgp)])
+    seven = json.loads(capsys.readouterr().out)
+
+    assert one["billed_diem"] != seven["billed_diem"]        # --days N means N
+    assert one["projects"] == []                             # the row is 7d old
+    assert seven["projects"][0]["project"] == "council"
+
+
+def test_venice_usage_flags_a_model_venice_billed_and_the_ledger_never_saw(
+        tmp_path, monkeypatch, capsys):
+    """The claude-fable-5-1 hole, surfaced by the everyday command."""
+    cfgp = _cfg_file(tmp_path)
+    db = tmp_path / "ledger.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(db))
+    from venice_usage.ledger import append
+    append(project="council", task_type="ask", model="m", usd=1.00,
+           ts="2026-09-12T02:00:00", db_path=db)
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 9, 12, 12, 0))
+    _fake_billing(monkeypatch, {"claude-fable-5-1": {"diem": 81.36, "calls": 36}})
+
+    assert cli.main(["venice-usage", "--json", "--config", str(cfgp)]) == 0
+    models = {r["model"]: r for r in json.loads(capsys.readouterr().out)["models"]}
+    assert models["claude-fable-5-1"]["note"] == "untracked"
+    assert models["m"]["note"] == "no bill"
+
 
 def test_venice_usage_degrades_when_venice_unavailable(tmp_path, monkeypatch, capsys):
     cfgp = _cfg_file(tmp_path)
     monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "ledger.db"))
     monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
     from diem.usage import UsageUnavailable
+
     class Down:
-        def __init__(self, *a, **k): pass
-        def per_key_usage(self): raise UsageUnavailable("down")
+        def __init__(self, *a, **k):
+            pass
+
+        def billed_by_model(self, **k):
+            raise UsageUnavailable("down")
     monkeypatch.setattr(cli, "UsageClient", Down)
     assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # still exits 0
     assert "unavailable" in capsys.readouterr().out.lower()
 
-def test_venice_usage_flags_coverage_gaps(tmp_path, monkeypatch, capsys):
-    cfgp = _cfg_file(tmp_path)
-    db = tmp_path / "ledger.db"
-    monkeypatch.setenv("VENICE_USAGE_DB", str(db))
-    from venice_usage.ledger import append
-    append(project="romance", task_type="draft", model="m", usd=1.00,
-           ts="2026-07-18T02:00:00", db_path=db)          # ledger rows, but no Venice key
-    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 7, 18, 12, 0))
-    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "sk-admin")
-
-    class FakeUsage:                                       # Venice usage, but no ledger rows
-        def __init__(self, *a, **k): pass
-        def per_key_usage(self):
-            return [{"key_id": "k9", "key_name": "proj-ghost", "usd": 2.50, "diem": 1.0}]
-    monkeypatch.setattr(cli, "UsageClient", FakeUsage)
-
-    assert cli.main(["venice-usage", "--json", "--config", str(cfgp)]) == 0
-    rows = {r["project"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
-    assert rows["romance"]["note"] == "no key"     # ledger row, no matching key
-    assert rows["ghost"]["note"] == "uncovered"    # key usage, no ledger row (broken call-site)
 
 def test_venice_usage_degrades_when_admin_key_missing(tmp_path, monkeypatch, capsys):
     cfgp = _cfg_file(tmp_path)
     monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "ledger.db"))
 
     def boom():
-        raise SystemExit(2)                                # load_venice_admin_key when key absent
+        raise SystemExit(2)                # load_venice_admin_key when key absent
     monkeypatch.setattr(cli, "load_venice_admin_key", boom)
-    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # must never hard-fail
+    assert cli.main(["venice-usage", "--config", str(cfgp)]) == 0   # never hard-fail
     assert "unavailable" in capsys.readouterr().out.lower()
 
 
-def test_venice_usage_rows_report_diem_and_have_no_delta(monkeypatch, capsys, tmp_path):
-    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
+def test_venice_usage_labels_the_estimate_and_says_bills_have_no_project(
+        tmp_path, monkeypatch, capsys):
+    cfgp = _cfg_file(tmp_path)
+    db = tmp_path / "ledger.db"
+    monkeypatch.setenv("VENICE_USAGE_DB", str(db))
     from venice_usage.ledger import append
-    append(project="council", task_type="ask", model="m", usd=1.25)
+    append(project="council", task_type="ask", model="m", usd=1.25,
+           ts="2026-09-12T02:00:00", db_path=db)
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 9, 12, 12, 0))
+    _fake_billing(monkeypatch, {"m": {"diem": 12.5, "calls": 3}})
 
-    class FakeClient:
-        def __init__(self, *a, **k): pass
-        def per_key_usage(self):
-            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
-
-    monkeypatch.setattr(cli, "UsageClient", FakeClient)
-    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
-
-    cli._cmd_venice_usage(None, datetime(2026, 7, 20), as_json=True)
-    payload = json.loads(capsys.readouterr().out)
-    row = next(r for r in payload["rows"] if r["project"] == "council")
-
-    assert row["est_usd"] == 1.25
-    assert row["venice_usd"] == 0.0
-    assert row["venice_diem"] == 12.5
-    assert "delta" not in row
-
-
-def test_venice_usage_table_header_labels_the_estimate_and_shows_diem(monkeypatch, capsys, tmp_path):
-    monkeypatch.setenv("VENICE_USAGE_DB", str(tmp_path / "t.db"))
-    from venice_usage.ledger import append
-    append(project="council", task_type="ask", model="m", usd=1.25)
-
-    class FakeClient:
-        def __init__(self, *a, **k): pass
-        def per_key_usage(self):
-            return [{"key_id": "1", "key_name": "council", "usd": 0.0, "diem": 12.5}]
-
-    monkeypatch.setattr(cli, "UsageClient", FakeClient)
-    monkeypatch.setattr(cli, "load_venice_admin_key", lambda: "admin")
-
-    cli._cmd_venice_usage(None, datetime(2026, 7, 20))
+    cli.main(["venice-usage", "--config", str(cfgp)])
     out = capsys.readouterr().out
-    assert "est$" in out and "diem" in out
-    assert "delta" not in out
-    # The estimate must be labelled as notional so it is never read as billed spend.
+    # The estimate must be labelled notional so it is never read as billed spend,
+    # and the project table must say why it carries no billed column.
     assert "estimate" in out.lower()
+    assert "billed" in out.lower()
+    assert "no project" in out.lower()
+    assert "12.5" in out

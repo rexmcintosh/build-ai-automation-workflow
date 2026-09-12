@@ -59,3 +59,39 @@ def test_report_argparse_error_not_swallowed(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as ei:
         cli.main(["report", "--nonexistent-flag"])
     assert ei.value.code == 2
+
+
+# --- `reconcile` as a first-class subcommand -------------------------------
+# It existed only as `python -m venice_usage.reconcile`, i.e. in practice only
+# as `/home/dev/.local/share/pipx/venvs/council/bin/python -m ...`. Nobody
+# remembers that, so nobody ran the one check that catches a mispriced ledger.
+
+def test_reconcile_is_a_venice_usage_subcommand(monkeypatch, capsys):
+    import venice_usage.reconcile as rec
+    monkeypatch.setenv("VENICE_ADMIN_KEY", "sk-admin")
+    seen = {}
+
+    def fake_run(a):
+        seen.update(since=a.since, project=a.project, backfill=a.backfill,
+                    price_basis=a.price_basis)
+        return 0
+
+    monkeypatch.setattr(rec, "run", fake_run)
+    assert cli.main(["reconcile", "--since", "2026-09-04", "--project", "council",
+                     "--backfill"]) == 0
+    assert seen == {"since": "2026-09-04", "project": "council",
+                    "backfill": True, "price_basis": "current"}
+
+
+def test_reconcile_is_listed_in_the_top_level_help(capsys):
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "reconcile" in capsys.readouterr().out
+
+
+def test_reconcile_without_an_admin_key_says_so_and_does_not_exit_zero(monkeypatch,
+                                                                       capsys):
+    monkeypatch.delenv("VENICE_ADMIN_KEY", raising=False)
+    assert cli.main(["reconcile", "--since", "2026-09-04"]) == 1
+    assert "VENICE_ADMIN_KEY" in capsys.readouterr().err

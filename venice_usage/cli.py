@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from . import reconcile as _reconcile
 from .ledger import append, query_rollup
 from .portable import export_jsonl, github_origin, ingest_jsonl
 
@@ -96,6 +97,18 @@ def _cmd_ingest(a) -> int:
     return 2 if failures else 0
 
 
+def _cmd_reconcile(a) -> int:
+    """Compare the ledger with Venice's bills — and recover what it never saw.
+
+    This was implemented, tested and then reachable only as
+    `/home/dev/.local/share/pipx/venvs/council/bin/python -m venice_usage.reconcile`.
+    Nobody types that, so the one check that catches a mispriced ledger — and
+    the only way to recover spend an OOM-killed session never logged — was in
+    practice never run. It is a subcommand now, with the same flags, because a
+    command that exists but cannot be reached is a command that does not exist."""
+    return _reconcile.run(a)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="venice-usage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -129,6 +142,10 @@ def main(argv=None) -> int:
                          "at log time — mixed vintages, unpriced models read as 0. "
                          "Neither ever modifies a stored row.")
     rp.add_argument("--json", action="store_true")
+    _reconcile.add_arguments(
+        sub.add_parser("reconcile", description=_reconcile.DESCRIPTION,
+                       help="compare the ledger with Venice's bills; --backfill "
+                            "recovers billed calls the ledger never saw"))
     argv = sys.argv[1:] if argv is None else list(argv)
     # Deviation from brief, flagged: argparse's own validation (missing --model,
     # non-int --tokens-in, ...) calls sys.exit(2) from inside parse_args() below —
@@ -146,8 +163,8 @@ def main(argv=None) -> int:
             print("venice-usage: log failed (ignored): bad arguments", file=sys.stderr)
             return 0
         raise
-    return {"log": _cmd_log, "export": _cmd_export,
-            "ingest": _cmd_ingest, "report": _cmd_report}[a.cmd](a)
+    return {"log": _cmd_log, "export": _cmd_export, "ingest": _cmd_ingest,
+            "report": _cmd_report, "reconcile": _cmd_reconcile}[a.cmd](a)
 
 if __name__ == "__main__":
     raise SystemExit(main())

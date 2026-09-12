@@ -22,7 +22,7 @@ class VeniceClient:
 
     def __init__(self, api_key, *, base_url=VENICE_API, timeout=180,
                  retries=2, backoff=1.5, post=None, temperature=0.2,
-                 max_completion_tokens=None):
+                 max_completion_tokens=None, transport_is_real=None):
         if not api_key:
             raise VeniceError("VENICE_API_KEY is not set")
         self.api_key = api_key
@@ -37,6 +37,14 @@ class VeniceClient:
         self.backoff = backoff
         self.temperature = temperature
         self._post = post or requests.post
+        # An injected transport means this client is not making real Venice
+        # calls, so the usage it would log is synthetic and must not reach the
+        # production ledger (see venice_usage/guard.py — a hand-run demo put 13
+        # fabricated rows into it on 2026-09-11). A wrapper that DOES call
+        # Venice for real — a budget cap, a retry shim — says so here, once.
+        self._transport_is_real = (
+            (post is None or post is requests.post) if transport_is_real is None
+            else bool(transport_is_real))
 
     def _scrub(self, text):
         # Defense in depth: never let our own API key ride along in a prompt,
@@ -51,14 +59,13 @@ class VeniceClient:
         # (ledger package missing, malformed usage block, disk full, ...) is swallowed.
         try:
             import venice_usage
-            usage = data.get("usage") or {} if isinstance(data, dict) else {}
-            venice_usage.append(
+            venice_usage.log_client_call(
+                data=data,
+                model=model,
                 project="council",
                 task_type=task_type,
-                model=model,
-                tokens_in=usage.get("prompt_tokens") or 0,
-                tokens_out=usage.get("completion_tokens") or 0,
                 source="council/venice",
+                transport_is_real=self._transport_is_real,
             )
         except Exception:
             pass
