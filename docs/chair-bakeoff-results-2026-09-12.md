@@ -78,10 +78,12 @@ when every changed path is developer tooling, and at `"reduced"` the bar is
 Neither B's nor C's panel contains a single `critical` finding, so
 `candidate_findings` is empty and the gate returns 0 for every candidate. On
 Case C that means **even a chair that correctly confirmed both real defects would
-not have blocked build-ai-automation-workflow PR 11.** The two bugs shipped
-because the tier rule closed the door before the chair was asked, not because the
-incumbent under-called them. The chair still under-called them — that is what
-Case C measures — but replacing the chair would not, on its own, have caught them.
+not have blocked build-ai-automation-workflow PR 11.** `run_pr_review` calls the
+chair before computing the tier. The gate then discards its confirmed blocks
+when no panel finding clears the tier threshold. The chair still under-called
+the defects in this replay, but replacing it alone would not have changed the
+gate outcome. This replay does not establish the complete historical cause of
+the original merge.
 
 Consequence for the rubric: Axis 1 is scored on the chair's own
 `blocking_findings` list, with the gate's `decide_blocking` count recorded beside
@@ -438,22 +440,26 @@ per-panel `chair_model`, exactly as `chair_max_completion_tokens` resolves today
 
 ## 6. The finding that outranks the chair choice
 
-**On developer-tooling PRs the merge gate cannot block on anything short of a
-`critical`, and the chair is never consulted.**
+**On developer-tooling PRs the merge gate cannot block without a confident
+`critical` panel finding, even when the chair confirms a real `high`.**
 
 `baw-pr11` shipped two real bugs. The incumbent chair under-called both — that is
-measured above, three times over. But `risk_tier` had already returned `"reduced"`
-for that PR, the tier bar there is `critical` with confidence ≥ 8, the panel's best
-was `high` c9, so `candidate_findings` was empty and `decide_blocking` returned 0
-before the chair's answer was even read. **When `openai-gpt-56-sol` correctly
+measured above, three times over. After calling the chair, `run_pr_review`
+computes `risk_tier`. For that PR it returns `"reduced"`, whose bar is `critical`
+with confidence ≥ 8. The panel's best was `high` c9, so `candidate_findings`
+was empty and `decide_blocking` returned 0 regardless of the chair's answer.
+The chair call still incurs cost and its answer appears in the review comment.
+**When `openai-gpt-56-sol` correctly
 blocked in this run, the gate still returned `blocking = 0`.** Every Case C cell in
 the evidence file shows `gate_blocking: 0`, including sol's three correct blocks and
 sonnet's one.
 
 So: replacing the chair improves the *review comment* on dev-tooling PRs. It does not
-change the *gate outcome* on them at all. `scripts/`, `tools/`, `tests/`, `setup/`
-and `.github/` are exactly where this repo's own CI shim, the backlog runner and the
-council live — the code that decides whether other code merges. Whether that tier
+change the *gate outcome* on these two reduced-tier fixtures. A tooling change
+with an eligible critical finding can still be blocked. `scripts/`, `tools/`,
+`tests/`, `setup/`, and `.github/` include the CI shim and workflow configuration.
+Council and the backlog runner also have top-level `council/` and `backlogrun/`
+packages; those paths do not automatically receive the reduced tier. Whether that tier
 rule is right is a separate decision from the chair, it is worth more than the chair,
 and nothing here changes it either.
 
