@@ -345,3 +345,34 @@ def test_a_billed_id_the_catalogue_cannot_name_is_not_wanted():
     # It would only land in UNKNOWN and add noise; `unresolved` already names it.
     wanted = rp.wanted_models(existing=[], billed=BILLING, catalogue_ids={"claude-opus-4-8"})
     assert "claude-sonnet-5-api" not in wanted
+
+
+def test_check_ignores_the_evidence_that_legitimately_moves(tmp_path):
+    """`--check` is meant to run on a clock. It must fire on a price that moved,
+    not on today's date or on one more billed row inside the lookback window."""
+    path = tmp_path / "price_table.py"
+    path.write_text(rp.render(_build()))
+    later = rp.build_table(CATALOGUE, BILLING + [
+        billed("claude-opus-4-8-llm-input-mtoken", 1.0, 6.0, 6.0, "2026-09-30T00:00:00Z")],
+        wanted=_build()["covers"], refreshed_at="2026-10-30", window="2026-10-09..2026-10-31")
+    assert rp.check(later, path) == 0        # same prices, newer receipts
+
+
+def test_check_still_fires_when_a_price_actually_moves(tmp_path):
+    path = tmp_path / "price_table.py"
+    path.write_text(rp.render(_build()))
+    dearer = {"data": [dict(m, model_spec={"pricing": dict(
+        m["model_spec"]["pricing"], input=cell(9))}) if m["id"] == "claude-opus-4-8" else m
+        for m in CATALOGUE["data"]]}
+    moved = rp.build_table(dearer, BILLING, wanted=_build()["covers"],
+                           refreshed_at="2026-09-12")
+    assert rp.check(moved, path) == 2
+
+
+def test_check_fires_when_a_new_model_needs_covering(tmp_path):
+    path = tmp_path / "price_table.py"
+    path.write_text(rp.render(_build()))
+    wider = rp.build_table(CATALOGUE, BILLING,
+                           wanted=_build()["covers"] + ["claude-fable-5-1"],
+                           refreshed_at="2026-09-12")
+    assert rp.check(wider, path) == 2

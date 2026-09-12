@@ -483,19 +483,41 @@ def describe(before, after):
 
 
 # ------------------------------------------------------------------- check --
+#: What `--check` compares. Everything here changes only when the money changes
+#: or a model stops being covered. REFRESHED_AT, BILLING_WINDOW, BILLED,
+#: REPRICED and DISAGREEMENTS are deliberately excluded: they move with today's
+#: date and with whichever bills happen to fall inside the lookback window, and
+#: a check that fires on those is a check people learn to ignore.
+CHECKED = ("PRICES", "UNPRICED", "UNKNOWN", "COVERS")
+
+
+def _checked_values(namespace):
+    return {name: namespace.get(name) for name in CHECKED}
+
+
 def check(table, path=TABLE_PATH):
-    """0 when the committed table already matches the live catalogue, 2 when it
+    """0 when the committed table still matches the live catalogue, 2 when it
     does not. Exit code 2 is the thing to wire into cron or CI: a table nobody
     has refreshed is the failure mode that put a 2.5x error into an audit."""
     path = Path(path)
-    fresh = render(table)
     if not path.exists():
         print(f"venice prices: {path} is missing — the table is stale.", file=sys.stderr)
         return 2
-    if path.read_text(encoding="utf-8") == fresh:
+    committed: dict = {}
+    try:
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), committed)  # noqa: S102
+    except Exception as e:  # noqa: BLE001
+        print(f"venice prices: {path} could not be read ({e}) — treating as stale.",
+              file=sys.stderr)
+        return 2
+    fresh: dict = {}
+    exec(compile(render(table), "<fresh>", "exec"), fresh)  # noqa: S102
+    drifted = [name for name in CHECKED if committed.get(name) != fresh.get(name)]
+    if not drifted:
         return 0
-    print("venice prices: the committed table is stale — it disagrees with the live "
-          "catalogue. Run `python -m venice_usage.refresh_prices --write`.", file=sys.stderr)
+    print(f"venice prices: the committed table is stale — {', '.join(drifted)} "
+          f"disagree(s) with the live catalogue. Run "
+          f"`python -m venice_usage.refresh_prices --write`.", file=sys.stderr)
     return 2
 
 
