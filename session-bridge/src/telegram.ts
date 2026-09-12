@@ -1,51 +1,43 @@
 import { chunkText } from './chunk'
 
+export interface TelegramSendReceipt { messageIds: number[] }
+
 export class Telegram {
   constructor(private token: string) {}
 
-  async call(
-    method: string,
-    params: Record<string, unknown> = {},
-    timeoutMs = 30_000,
-  ): Promise<any> {
+  async call(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<any> {
     let res: Response
     try {
       res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(params),
-        signal: AbortSignal.timeout(timeoutMs),
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(params), signal: AbortSignal.timeout(timeoutMs),
       })
     } catch {
-      // Bun's fetch errors carry a `path` property holding the full URL — which
-      // contains the token. Never let the original error escape.
       throw new Error(`telegram ${method}: network failure`)
     }
-    const body: any = await res.json()
-    if (!body.ok) {
-      // Never include the URL (contains the token) in errors.
-      throw new Error(`telegram ${method} failed: ${body.error_code} ${body.description}`)
+    let body: any
+    try { body = await res.json() } catch { throw new Error(`telegram ${method}: invalid provider response`) }
+    if (!res.ok || body?.ok !== true) {
+      throw new Error(`telegram ${method} failed: ${body?.error_code ?? res.status} ${body?.description ?? 'provider rejection'}`)
     }
     return body.result
   }
 
   async getUpdates(offset: number, timeoutSec: number): Promise<any[]> {
-    // Long poll: allow the server's full hold time plus slack before aborting.
-    return this.call(
-      'getUpdates',
-      { offset, timeout: timeoutSec, allowed_updates: ['message'] },
-      (timeoutSec + 15) * 1000,
-    )
+    return this.call('getUpdates', { offset, timeout: timeoutSec, allowed_updates: ['message'] }, (timeoutSec + 15) * 1000)
   }
 
-  async send(chatId: number, threadId: number | undefined, text: string): Promise<void> {
+  async send(chatId: number, threadId: number | undefined, text: string): Promise<TelegramSendReceipt> {
+    const messageIds: number[] = []
     for (const chunk of chunkText(text)) {
-      await this.call('sendMessage', {
-        chat_id: chatId,
-        text: chunk,
+      const result = await this.call('sendMessage', {
+        chat_id: chatId, text: chunk,
         ...(threadId !== undefined ? { message_thread_id: threadId } : {}),
       })
+      if (!Number.isInteger(result?.message_id)) throw new Error('telegram sendMessage: accepted response has no message_id')
+      messageIds.push(result.message_id)
     }
+    return { messageIds }
   }
 
   async createTopic(chatId: number, name: string): Promise<number> {

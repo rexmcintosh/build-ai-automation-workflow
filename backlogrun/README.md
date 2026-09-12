@@ -13,6 +13,7 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
     backlog-run work --dry-run           # what tonight would do; changes nothing
     backlog-run work                     # the nightly run (cron); open -> in_review | held
     backlog-run work --only <id>         # one specific item (also --repo NAME, --max-items N)
+    backlog-run rework <id> --no-notify   # continue its existing held/in_review branch
     backlog-run report                   # morning report, numbered
     backlog-run show 1  |  diff 1        # details / full diff (number from the report, or an id)
     backlog-run approve 1 3              # merge --no-ff into main, push, delete branch, archive done
@@ -23,7 +24,8 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 
 `work` flags: `--max-items` (2) · `--item-timeout` seconds (3600) · `--deadline` seconds
 (10800) · `--budget-usd` per session (20; 0 = none) · `--model` · `--no-council` ·
-`--no-notify` · `--keep-worktree`.
+`--no-notify` · `--keep-worktree`. `rework` accepts the same session flags except
+`--max-items` and `--deadline`; it always targets one existing branch.
 
 ## What the session gets
 
@@ -38,7 +40,8 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 
 ## Guarantees under failure
 
-- An item is only transitioned if it is **still `open`** when the run finishes. If you
+- A new item is only transitioned if it is **still `open`** when the run finishes. A rework
+  item must still have its exact starting status. If you
   held/reopened it meanwhile, your state wins and the run's result becomes a
   `runner: CONFLICT …` note (the branch is kept).
 - An empty leftover `claude/bl-*` branch (no commits, no worktree) is reclaimed on the next
@@ -46,7 +49,8 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 - Every branch that carries work is council-reviewed — held ones too. A council failure is
   recorded as the verdict (`REVIEW FAILED: …`); the item still goes to `in_review` — the
   morning report shows it, you review by hand.
-- `approve` takes `in_review` items; a held item's branch needs `--held`.
+- `approve` takes `in_review` items; a held item's branch needs `--held`. Both require the
+  branch head to equal `reviewed_sha`; advisory readiness does not add another gate.
 - `repo:` must resolve inside `~/projects` (no `..`, no absolute escapes) or the item is held.
 - `approve` records the merge in the backlog **before** deleting the branch and is safe to
   re-run (an already-merged branch is not merged twice). `drop` records before deleting.
@@ -56,7 +60,8 @@ as `in_review` (or `held`) for you. Nothing is ever pushed or merged by the cloc
 
 ## Item fields the runner writes
 
-`status`, `branch`, `worked`, `council`, `note`, `session` (claude session id), `cost_usd`.
+`status`, `branch`, `worked`, `council`, `note`, `session` (claude session id), `cost_usd`,
+`reviewed_sha` (the exact branch commit submitted to review).
 `approve` adds `merged`, `merge_commit`; `drop` adds `dropped`. Both move the item to
 `archive.yaml`.
 
@@ -106,9 +111,10 @@ The report preserves full conditions and links to the full review. Its JSON adds
 `review_readiness`, keyed by item ID; the existing `numbers` mapping stays intact.
 `show` displays the same readiness and full evidence. Short notifications state
 readiness and point to `show`, instead of clipping a possibly conditional verdict.
-Only ready rows suggest the numbered `approve` command. This is display guidance:
-`approve` keeps its existing human authority and behavior, including `--held`.
-There is no new approval gate and no automatic merge.
+Only ready rows suggest the numbered `approve` command. This is display guidance, not
+a readiness gate. `approve` still uses the existing human authority, including `--held`,
+but now refuses when the branch head differs from its exact recorded review SHA. There is
+no automatic merge.
 
 For new items, an optional `required_validations` list declares check names before
 the session starts, for example `required_validations: [pytest, lint]`. Names are
@@ -144,3 +150,5 @@ incomplete panel also remains unknown; reviewer or synthesis errors are failures
 Run the focused checks with:
 
     python3 -m pytest tests/test_backlogrun.py tests/test_backlog_readiness.py tests/test_synthesize.py -q
+
+For older review records without `reviewed_sha`, the owner can inspect the exact current review and use `approve <id> --reviewed-sha <full-40-character-SHA>`. That explicit identity applies to one item. Romance Ops passes its displayed review SHA into this same entrypoint. The merge names the immutable commit, so movement of the branch after validation cannot add unreviewed commits. A revised brief during rework preserves the owner's item and stores `runner_conflict` instead of marking the newer request complete.

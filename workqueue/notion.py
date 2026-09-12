@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import shlex
 import requests
@@ -60,13 +62,18 @@ class Notion:
             return r.json()
         raise NotionError('Notion retry exhausted')
 
-    def children(self, page_id):
-        out, cursor = [], None
+    def children(self, page_id, *, max_blocks=None):
+        out, cursor, cursors = [], None, set()
         while True:
             result = self.call('GET', '/blocks/'+page_id+'/children?page_size=100'+('&start_cursor='+cursor if cursor else ''))
             out.extend(result['results'])
+            if max_blocks is not None and len(out) > max_blocks:
+                raise NotionError('Source exceeds the bounded reader')
             if not result.get('has_more'): return out
-            cursor = result['next_cursor']
+            cursor = result.get('next_cursor')
+            if not cursor or cursor in cursors:
+                raise NotionError('Source pagination is incomplete')
+            cursors.add(cursor)
 
     def tasks(self):
         out, cursor = [], None
@@ -78,6 +85,42 @@ class Notion:
             out.extend(parse_task(p) for p in result['results'])
             if not result.get('has_more'): return out
             cursor = result['next_cursor']
+
+    def ideal_state(self):
+        """Read only Attain's canonical page using this controller's scoped client."""
+        page_id = '3d645d882ebb81db9d50e35698091788'
+        page = self.call('GET', '/pages/' + page_id)
+        lines = []
+        count = 0
+
+        def collect(block_id, depth=0):
+            nonlocal count
+            if depth > 12:
+                raise NotionError('Ideal State nesting exceeds the bounded reader')
+            for block in self.children(block_id, max_blocks=400-count):
+                count += 1
+                if count > 400:
+                    raise NotionError('Ideal State exceeds the bounded reader')
+                kind = block.get('type', '')
+                body = block.get(kind, {})
+                text = ''.join(t.get('plain_text', t.get('text', {}).get('content', ''))
+                               for t in body.get('rich_text', []))
+                if text:
+                    lines.append('  ' * depth + text)
+                if block.get('has_children'):
+                    collect(block['id'], depth + 1)
+
+        collect(page_id)
+        text = '\n'.join(lines)
+        if not text.strip() or len(text) > 40000:
+            raise NotionError('Ideal State is empty or exceeds the context limit')
+        after = self.call('GET', '/pages/' + page_id)
+        if after.get('last_edited_time') != page.get('last_edited_time'):
+            raise NotionError('Ideal State changed during reading')
+        return {'status': 'current', 'source_url': page['url'],
+                'source_updated_at': page['last_edited_time'],
+                'observed_at': datetime.now(timezone.utc).isoformat(),
+                'sha256': hashlib.sha256(text.encode()).hexdigest(), 'text': text}
 
     def get_task_meta(self, page_id):
         return parse_task(self.call('GET', '/pages/'+page_id))

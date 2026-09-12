@@ -60,6 +60,13 @@ class Service:
             text = 'The brief or work mode changed during this run. These results cover the saved starting brief. Review them before choosing Ready again.\n\n' + text
         evidence = f"Run: {rid}\nMode: {run['task']['mode']}\nStarted: {run['started']}\nFinished: {run['finished']}\n"
         evidence += f"Session: {result.get('session', '')}\nBranch: {result.get('branch', '')}\nReview readiness: {result.get('readiness', 'unknown')}\n\n"
+        direction = run['task'].get('direction', {})
+        evidence += (f"Ideal State: {direction.get('status', 'unavailable')}\n"
+                     f"Source: {direction.get('source_url', 'not captured')}\n"
+                     f"Revision: {direction.get('sha256', 'unknown')}\n"
+                     f"Observed: {direction.get('observed_at', 'unknown')}\n\n")
+        if direction.get('status') != 'current':
+            text = 'Current Ideal State unavailable for this run; results cover the saved authorized brief.\n\n' + text
         if 'publication_text' not in run:
             starting = '\nStarting brief:\n' + run['task']['brief'] + '\nDone when:\n' + run['task']['done_when'] + '\n\n'
             run['publication_text'] = evidence + starting + text
@@ -124,6 +131,12 @@ class Service:
             self.notion.update_task(task['id'], status='Needs your input', result=error)
             self.notion.health('A Ready task needs a clearer brief. Checked ' + now())
             return
+        # Read direction before claiming/launching and keep it with the starting brief.
+        # Failure is visible; it does not silently revoke authorization for a clear repair.
+        try:
+            task['direction'] = self.notion.ideal_state()
+        except Exception:
+            task['direction'] = {'status': 'unavailable', 'observed_at': now()}
         rid = 'nq-' + uuid.uuid4().hex
         run = {'id': rid, 'task': task, 'fingerprint': fingerprint(task), 'phase': 'claiming', 'started': now()}
         self.journal['runs'][rid] = run

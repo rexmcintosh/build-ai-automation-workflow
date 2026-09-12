@@ -65,11 +65,19 @@ two-minute config that backstops everything above.
 **cooldown** (6h) has elapsed since the last alert. Recovered checks drop from state.
 Nothing is silently dropped — every poll appends to `logs/runs.log`.
 
+## Delivery evidence
+
+The pre-check stages `watchdog/delivery-pending.json` before alert delivery.
+Only a valid `tg-send` provider receipt moves the proposed cooldown state into
+`state.json`. A definite rejection remains retryable on the next 30-minute poll.
+A timeout or other uncertain send remains visible and is not sent again
+automatically. The last accepted provider receipt is retained in
+`watchdog/delivery-last.json`. Provider acceptance is not human receipt.
+
 ## Boundary
 
-The investigator agent runs with `--allowedTools Read mcp__…telegram…reply` only —
-**no Bash/Write/Edit**. It can read logs and send one Telegram message. It cannot
-change anything.
+The investigator agent runs with `--allowedTools Read` only. The wrapper sends
+its result through `bin/tg-send`; the agent has no send tool.
 
 ## Architecture
 
@@ -84,12 +92,12 @@ change anything.
 - `run-watchdog.sh` — cron entry; parses the pre-check, escalates to the agent.
 - `prompts/investigate.md` — the read-only investigator prompt.
 
-## Deploy (human-gated — not auto-installed)
+## Activate after review
 
-After merge to `main`, add to crontab (every 30 min):
+No runtime was changed by this repair. After the reviewed commit reaches the
+main checkout, run `pytest -q tests/test_watchdog_delivery.py tests/test_watchdog_retry.py tests/test_watchdog_wrapper.py`
+and `watchdog/run-watchdog.sh --dry-run`. The existing 30-minute cron entry then
+uses the repaired wrapper automatically. The dry run does not send or commit
+notification suppression.
 
-```
-*/30 * * * *  /home/dev/projects/build-ai-automation-workflow/watchdog/run-watchdog.sh  >> /home/dev/projects/build-ai-automation-workflow/watchdog/logs/cron.log 2>&1
-```
-
-`state.json` and `logs/` are gitignored.
+The wrapper owns one file lock across precheck, investigation and delivery. It persists an `attempting` delivery before calling Telegram; interruption requires inspection, not automatic replay. An accepted receipt is saved before cooldown state, and a later interrupted local commit resumes from that receipt without sending again. `--dry-run` passes through to the precheck and does not stage pending delivery, cooldown or metric state. The wrapper may still append its diagnostic run log. State writes sync the file and directory.

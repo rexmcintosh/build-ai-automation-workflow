@@ -47,3 +47,7 @@ Install a reviewed checkout into a dedicated virtual environment, then point `cu
 Verify with `python3 -m pytest tests/test_workqueue.py tests/test_workqueue_runner.py tests/test_backlogrun.py tests/test_backlog_readiness.py -q`. Offline tests use fake Notion and fake sessions. A separately labelled live smoke validates Ready-to-result without modifying customer/application data.
 
 Notion uses API version 2022-06-28, compatible with the established feedback database. Relations are single-property links to that database. See https://developers.notion.com/changelog/releasing-notion-version-2022-06-28 for that API contract.
+
+### Current Ideal State at preparation
+
+The trusted controller now reads Attain's canonical Ideal State before claiming a task, using the existing scoped token. It saves source URL, source edit time, observation time, content hash and text in the run journal before launch. The worker receives that packet without the credential and keeps accepted decisions separate from proposed criteria. A missing or changed source is named as an evidence gap; an already-authorized routine task can continue within its original brief. Crash recovery retains the original task packet and never starts a replacement worker to reconstruct it. This is one initiative handoff, not a new universal memory service.
